@@ -304,6 +304,65 @@ def load_aoi_bounds_wgs84(aoi_path: Path) -> tuple[float, float, float, float]:
     return tuple(float(value) for value in aoi.to_crs("EPSG:4326").total_bounds)
 
 
+def write_tiny_aoi(
+    *,
+    aoi_path: Path,
+    output_path: Path,
+    size_meters: float,
+) -> Path:
+    import geopandas as gpd
+    from shapely.geometry import box
+    from shapely import wkt
+
+    if size_meters <= 0:
+        raise ValueError("--size-meters must be positive.")
+
+    aoi_path = Path(aoi_path).expanduser().resolve()
+    output_path = Path(output_path).expanduser().resolve()
+    if not aoi_path.exists():
+        raise FileNotFoundError(f"AOI file not found: {aoi_path}")
+    if aoi_path.is_dir():
+        raise IsADirectoryError(f"AOI path points to a directory, not a vector file: {aoi_path}")
+
+    suffix = aoi_path.suffix.lower()
+    if suffix in {".wkt", ".txt"}:
+        geom = wkt.loads(aoi_path.read_text(encoding="utf-8").strip())
+        aoi = gpd.GeoDataFrame(geometry=[geom], crs="EPSG:4326")
+    else:
+        aoi = gpd.read_file(aoi_path)
+        if aoi.crs is None:
+            aoi = aoi.set_crs("EPSG:4326")
+
+    aoi_3857 = aoi.to_crs("EPSG:3857")
+    if hasattr(aoi_3857.geometry, "union_all"):
+        geometry = aoi_3857.geometry.union_all()
+    else:
+        geometry = aoi_3857.geometry.unary_union
+    center = geometry.centroid
+    half = size_meters / 2
+    tiny = gpd.GeoDataFrame(
+        {"name": [f"tiny_{int(size_meters)}m"]},
+        geometry=[box(center.x - half, center.y - half, center.x + half, center.y + half)],
+        crs="EPSG:3857",
+    ).to_crs("EPSG:4326")
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    tiny.to_file(output_path, driver="GeoJSON")
+    LOGGER.info("Wrote tiny AOI %.1fm x %.1fm: %s", size_meters, size_meters, output_path)
+    return output_path
+
+
+def resolve_requests_verify(no_verify_ssl: bool = False, ca_bundle: Path | None = None) -> bool | str:
+    if no_verify_ssl:
+        return False
+    if ca_bundle is None:
+        return True
+    ca_bundle = Path(ca_bundle).expanduser().resolve()
+    if not ca_bundle.exists():
+        raise FileNotFoundError(f"CA bundle not found: {ca_bundle}")
+    return str(ca_bundle)
+
+
 def download_xyz_tiles(
     *,
     url_template: str,
@@ -317,6 +376,7 @@ def download_xyz_tiles(
     overwrite: bool = False,
     user_agent: str = "field-delineation-pipeline/1.0",
     max_tiles: int | None = None,
+    verify_ssl: bool | str = True,
 ) -> list[Path]:
     """Download XYZ tiles for WGS84 bounds from a URL template."""
 
@@ -335,6 +395,15 @@ def download_xyz_tiles(
     extension = extension.lstrip(".")
     session = requests.Session()
     session.headers.update({"User-Agent": user_agent})
+    if verify_ssl is False:
+        try:
+            import urllib3
+            from urllib3.exceptions import InsecureRequestWarning
+
+            urllib3.disable_warnings(InsecureRequestWarning)
+        except Exception:
+            pass
+        LOGGER.warning("SSL certificate verification is disabled for XYZ tile downloads.")
 
     downloaded: list[Path] = []
     manifest_rows: list[dict[str, Any]] = []
@@ -349,7 +418,7 @@ def download_xyz_tiles(
             continue
 
         LOGGER.info("Downloading XYZ tile %d/%d: z=%d x=%d y=%d", index, len(planned), zoom, x, y)
-        with session.get(url, stream=True, timeout=timeout) as response:
+        with session.get(url, stream=True, timeout=timeout, verify=verify_ssl) as response:
             response.raise_for_status()
             with output_path.open("wb") as handle:
                 for chunk in response.iter_content(chunk_size=1024 * 256):
@@ -370,6 +439,7 @@ def download_xyz_tiles(
                 "provider": provider,
                 "attribution": xyz_provider_attribution(provider),
                 "url_template": url_template,
+                "verify_ssl": verify_ssl,
                 "tiles": manifest_rows,
             },
             handle,
@@ -409,7 +479,14 @@ def build_parser() -> argparse.ArgumentParser:
     download.add_argument("--overwrite", action="store_true")
     download.add_argument("--user-agent", default="field-delineation-pipeline/1.0")
     download.add_argument("--max-tiles", default=5000, type=int)
+    download.add_argument("--ca-bundle", default=None, type=Path, help="Optional PEM CA bundle for corporate TLS interception.")
+    download.add_argument("--no-verify-ssl", action="store_true", help="Disable SSL verification for tile downloads. Use only on trusted networks.")
     download.add_argument("--convert-output", default=None, type=Path, help="Optional GeoTIFF to create after download.")
+
+    tiny_aoi = subparsers.add_parser("tiny-aoi", help="Create a small centered square AOI for basemap smoke tests.")
+    tiny_aoi.add_argument("--aoi", required=True, type=Path)
+    tiny_aoi.add_argument("--output", required=True, type=Path)
+    tiny_aoi.add_argument("--size-meters", default=500.0, type=float, help="Square side length in meters.")
 
     providers = subparsers.add_parser("providers", help="List built-in XYZ provider presets.")
     providers.set_defaults(command="providers")
@@ -438,6 +515,15 @@ def main(argv: Iterable[str] | None = None) -> None:
             print(f"  notes: {spec['notes']}")
         return
 
+    if args.command == "tiny-aoi":
+        output = write_tiny_aoi(
+            aoi_path=args.aoi,
+            output_path=args.output,
+            size_meters=args.size_meters,
+        )
+        print(output)
+        return
+
     bounds = load_aoi_bounds_wgs84(args.aoi)
     url_template = resolve_xyz_url_template(args.provider, args.url_template)
     if url_template is None:
@@ -454,6 +540,7 @@ def main(argv: Iterable[str] | None = None) -> None:
         overwrite=args.overwrite,
         user_agent=args.user_agent,
         max_tiles=args.max_tiles,
+        verify_ssl=resolve_requests_verify(args.no_verify_ssl, args.ca_bundle),
     )
     if args.convert_output:
         convert_xyz_tiles_to_geotiff(

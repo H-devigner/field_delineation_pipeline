@@ -97,6 +97,8 @@ def parse_args() -> argparse.Namespace:
     basemap.add_argument("--xyz-timeout", default=60, type=int, help="HTTP timeout per downloaded basemap tile.")
     basemap.add_argument("--xyz-sleep-seconds", default=0.0, type=float, help="Delay between downloaded basemap tile requests.")
     basemap.add_argument("--xyz-user-agent", default="field-delineation-pipeline/1.0", help="User-Agent for basemap tile requests.")
+    basemap.add_argument("--xyz-ca-bundle", default=None, type=Path, help="Optional PEM CA bundle for corporate TLS interception.")
+    basemap.add_argument("--xyz-no-verify-ssl", action="store_true", help="Disable SSL verification for tile downloads. Use only on trusted networks.")
     basemap.add_argument(
         "--xyz-max-download-tiles",
         default=5000,
@@ -834,7 +836,12 @@ def prepare_basemap_geotiff(
         return output_tif
 
     try:
-        from basemap_tiles import convert_xyz_tiles_to_geotiff, download_xyz_tiles, resolve_xyz_url_template
+        from basemap_tiles import (
+            convert_xyz_tiles_to_geotiff,
+            download_xyz_tiles,
+            resolve_requests_verify,
+            resolve_xyz_url_template,
+        )
     except ImportError as exc:
         raise ImportError("Could not import basemap_tiles.py from the pipeline folder.") from exc
 
@@ -858,6 +865,7 @@ def prepare_basemap_geotiff(
             overwrite=args.overwrite,
             user_agent=args.xyz_user_agent,
             max_tiles=args.xyz_max_download_tiles,
+            verify_ssl=resolve_requests_verify(args.xyz_no_verify_ssl, args.xyz_ca_bundle),
         )
 
     if tiles_root is None:

@@ -213,16 +213,27 @@ python pipeline.py \
 
 Download OpenAerialMap tiles for an AOI and convert them. Coverage depends on whether OpenAerialMap has open imagery for the area.
 
+Create a very small centered AOI first for smoke tests:
+
+```bash
+python basemap_tiles.py tiny-aoi \
+  --aoi /path/to/aoi.geojson \
+  --size-meters 500 \
+  --output runs/basemap_download/tiny_aoi_500m.geojson
+```
+
 ```bash
 python basemap_tiles.py download \
   --provider openaerialmap \
-  --aoi /path/to/aoi.geojson \
+  --aoi runs/basemap_download/tiny_aoi_500m.geojson \
   --zoom 18 \
   --output-root runs/basemap_download/tiles \
   --max-tiles 2000 \
   --sleep-seconds 0.05 \
   --convert-output runs/basemap_download/basemap_3857.tif
 ```
+
+If a corporate proxy intercepts HTTPS and the machine does not have the corporate CA installed, prefer passing a PEM file with `--ca-bundle /path/to/corp-ca.pem`. For a quick trusted-network smoke test only, use `--no-verify-ssl`.
 
 Run the full orchestrator by letting it download OpenAerialMap tiles first:
 
@@ -238,6 +249,7 @@ python pipeline.py \
   --xyz-name oam_basemap \
   --xyz-max-download-tiles 2000 \
   --xyz-sleep-seconds 0.05 \
+  --xyz-no-verify-ssl \
   --ee-project agriculture-486211 \
   --resume
 ```
