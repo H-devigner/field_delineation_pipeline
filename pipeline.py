@@ -17,6 +17,7 @@ import argparse
 import contextlib
 import csv
 import datetime as dt
+import importlib.util
 import json
 import logging
 import os
@@ -95,6 +96,12 @@ def parse_args() -> argparse.Namespace:
     lclu.add_argument("--skip-lclu", action="store_true", help="Run delineation without LCLU masks.")
     lclu.add_argument("--ee-project", default="agriculture-486211", help="Google Earth Engine project.")
     lclu.add_argument("--ee-authenticate", action="store_true", help="Run ee.Authenticate() before ee.Initialize().")
+    lclu.add_argument(
+        "--ee-auth-mode",
+        default=None,
+        choices=["notebook", "localhost", "gcloud", "appdefault", "colab"],
+        help="Earth Engine auth mode used with --ee-authenticate. Use 'notebook' on headless/remote servers without gcloud.",
+    )
     lclu.add_argument("--lclu-scale", default=10, type=int)
     lclu.add_argument("--lclu-crs", default="EPSG:4326")
     lclu.add_argument("--lclu-collection", default="GOOGLE/DYNAMICWORLD/V1")
@@ -237,20 +244,13 @@ def ensure_repositories(clone_missing: bool) -> None:
         marker_path = repo_path / REPO_MARKERS[repo_name]
         if marker_path.exists():
             if repo_branch:
-                branch_result = subprocess.run(
-                    ["git", "-C", str(repo_path), "branch", "--show-current"],
-                    capture_output=True,
-                    text=True,
-                    check=False,
+                ensure_repository_branch(
+                    repo_name=repo_name,
+                    repo_path=repo_path,
+                    repo_url=repo_url,
+                    repo_branch=repo_branch,
+                    allow_checkout=clone_missing,
                 )
-                current_branch = branch_result.stdout.strip()
-                if branch_result.returncode == 0 and current_branch != repo_branch:
-                    LOGGER.warning(
-                        "%s exists on branch '%s'; expected '%s'. Existing checkout will be used.",
-                        repo_name,
-                        current_branch or "<detached>",
-                        repo_branch,
-                    )
             continue
 
         if not clone_missing:
@@ -283,6 +283,134 @@ def ensure_repositories(clone_missing: bool) -> None:
         subprocess.run(command, check=True)
 
 
+def ensure_repository_branch(
+    *,
+    repo_name: str,
+    repo_path: Path,
+    repo_url: str,
+    repo_branch: str,
+    allow_checkout: bool,
+) -> None:
+    branch_result = subprocess.run(
+        ["git", "-C", str(repo_path), "branch", "--show-current"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    current_branch = branch_result.stdout.strip()
+    if branch_result.returncode != 0 or current_branch == repo_branch:
+        return
+
+    if not allow_checkout:
+        LOGGER.warning(
+            "%s exists on branch '%s'; expected '%s'. Existing checkout will be used.",
+            repo_name,
+            current_branch or "<detached>",
+            repo_branch,
+        )
+        return
+
+    status_result = subprocess.run(
+        ["git", "-C", str(repo_path), "status", "--porcelain"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    if status_result.stdout.strip():
+        raise RuntimeError(
+            f"{repo_name} at {repo_path} has uncommitted changes and is on branch "
+            f"'{current_branch}', but expected '{repo_branch}'. Commit/stash those changes "
+            "or switch the branch manually."
+        )
+
+    remotes_result = subprocess.run(
+        ["git", "-C", str(repo_path), "remote"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    remotes = {line.strip() for line in remotes_result.stdout.splitlines() if line.strip()}
+    remote_name = "pipeline"
+    if remote_name not in remotes:
+        subprocess.run(
+            ["git", "-C", str(repo_path), "remote", "add", remote_name, repo_url],
+            check=True,
+        )
+
+    LOGGER.info(
+        "%s exists on branch '%s'; switching to %s/%s.",
+        repo_name,
+        current_branch or "<detached>",
+        remote_name,
+        repo_branch,
+    )
+    subprocess.run(
+        ["git", "-C", str(repo_path), "fetch", remote_name, repo_branch],
+        check=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(repo_path), "switch", "-C", repo_branch, f"{remote_name}/{repo_branch}"],
+        check=True,
+    )
+
+
+def check_imports(requirements: dict[str, str]) -> list[str]:
+    missing = []
+    for import_name, package_name in requirements.items():
+        if importlib.util.find_spec(import_name) is None:
+            missing.append(package_name)
+    return sorted(set(missing))
+
+
+def check_python_environment(args: argparse.Namespace) -> None:
+    requirements = {
+        "geopandas": "geopandas",
+        "rasterio": "rasterio",
+        "shapely": "shapely",
+        "yaml": "PyYAML",
+    }
+    if not args.skip_lclu:
+        requirements.update(
+            {
+                "ee": "earthengine-api",
+                "geemap": "geemap",
+            }
+        )
+    if not args.skip_super_resolution:
+        if str(OPENSR_ROOT) not in sys.path:
+            sys.path.insert(0, str(OPENSR_ROOT))
+        requirements.update(
+            {
+                "omegaconf": "omegaconf",
+                "opensr_model": "opensr-model",
+                "opensr_utils": "opensr-utils",
+                "torch": "torch",
+            }
+        )
+    if not args.skip_delineation:
+        if str(DELINEATE_ROOT) not in sys.path:
+            sys.path.insert(0, str(DELINEATE_ROOT))
+        requirements.update(
+            {
+                "cv2": "opencv-python",
+                "huggingface_hub": "huggingface-hub",
+                "osgeo": "gdal",
+                "psutil": "psutil",
+                "torch": "torch",
+                "tqdm": "tqdm",
+                "ultralytics": "ultralytics",
+            }
+        )
+
+    missing = check_imports(requirements)
+    if missing:
+        raise ImportError(
+            "Missing Python packages in the environment running pipeline.py: "
+            + ", ".join(missing)
+            + ". Activate the shared conda environment or install these packages before running."
+        )
+
+
 def import_geospatial_stack() -> tuple[Any, Any, Any]:
     try:
         import geopandas as gpd
@@ -297,6 +425,72 @@ def union_geometry(gdf: Any) -> Any:
     if hasattr(gdf.geometry, "union_all"):
         return gdf.geometry.union_all()
     return gdf.geometry.unary_union
+
+
+def force_2d_geometry(geometry: Any) -> Any:
+    try:
+        import shapely
+
+        if hasattr(shapely, "force_2d"):
+            return shapely.force_2d(geometry)
+    except Exception:
+        pass
+
+    from shapely.ops import transform
+
+    return transform(lambda x, y, *args: (x, y), geometry)
+
+
+def make_valid_geometry(geometry: Any) -> Any:
+    try:
+        import shapely
+
+        if hasattr(shapely, "make_valid"):
+            return shapely.make_valid(geometry)
+    except Exception:
+        pass
+
+    return geometry.buffer(0)
+
+
+def extract_polygonal_geometry(geometry: Any) -> Any:
+    from shapely.geometry import GeometryCollection, MultiPolygon, Polygon
+    from shapely.ops import unary_union
+
+    if isinstance(geometry, (Polygon, MultiPolygon)):
+        return geometry
+
+    if isinstance(geometry, GeometryCollection):
+        polygons = []
+        for part in geometry.geoms:
+            if isinstance(part, Polygon):
+                polygons.append(part)
+            elif isinstance(part, MultiPolygon):
+                polygons.extend(part.geoms)
+            elif isinstance(part, GeometryCollection):
+                nested = extract_polygonal_geometry(part)
+                if isinstance(nested, Polygon):
+                    polygons.append(nested)
+                elif isinstance(nested, MultiPolygon):
+                    polygons.extend(nested.geoms)
+        if polygons:
+            return unary_union(polygons)
+
+    raise ValueError(f"Expected polygonal geometry for Earth Engine, got {geometry.geom_type}.")
+
+
+def earth_engine_geojson_geometry(geometry: Any) -> dict[str, Any]:
+    from shapely.geometry import mapping
+
+    geometry = force_2d_geometry(geometry)
+    if not geometry.is_valid:
+        geometry = make_valid_geometry(geometry)
+    geometry = extract_polygonal_geometry(geometry)
+    if geometry.is_empty:
+        raise ValueError("Earth Engine geometry is empty after cleanup.")
+
+    # JSON round-trip converts tuples and numpy scalar values into plain GeoJSON lists/numbers.
+    return json.loads(json.dumps(mapping(geometry)))
 
 
 def load_aoi(aoi_path: Path) -> Any:
@@ -570,14 +764,17 @@ def clip_raster_to_aoi(
     return output_tif
 
 
-def init_earth_engine(project: str, authenticate: bool) -> Any:
+def init_earth_engine(project: str, authenticate: bool, auth_mode: str | None) -> Any:
     try:
         import ee
     except ImportError as exc:
         raise ImportError("Install earthengine-api and geemap before downloading LCLU masks.") from exc
 
     if authenticate:
-        ee.Authenticate()
+        if auth_mode:
+            ee.Authenticate(auth_mode=auth_mode)
+        else:
+            ee.Authenticate()
     try:
         ee.Initialize(project=project)
     except Exception as exc:
@@ -602,17 +799,22 @@ def download_dynamic_world_mask(
 
     try:
         import geemap
-        from shapely.geometry import mapping
     except ImportError as exc:
         raise ImportError("Install geemap before downloading LCLU masks.") from exc
 
-    ee = init_earth_engine(args.ee_project, args.ee_authenticate)
+    ee = init_earth_engine(args.ee_project, args.ee_authenticate, args.ee_auth_mode)
     output_tif.parent.mkdir(parents=True, exist_ok=True)
     tmp_tif = output_tif.with_suffix(".tmp.tif")
     if tmp_tif.exists():
         tmp_tif.unlink()
 
-    geometry = ee.Geometry(mapping(geometry_wgs84))
+    geometry_geojson = earth_engine_geojson_geometry(geometry_wgs84)
+    LOGGER.info(
+        "Downloading LCLU mask with EE geometry type=%s bounds=%s",
+        geometry_geojson.get("type"),
+        geometry_wgs84.bounds,
+    )
+    geometry = ee.Geometry(geometry_geojson)
     dw_collection = (
         ee.ImageCollection(args.lclu_collection)
         .filterBounds(geometry)
@@ -895,6 +1097,7 @@ def main() -> None:
 
     with timed_step(summary, run_dir, "preflight"):
         ensure_repositories(args.clone_missing)
+        check_python_environment(args)
         LOGGER.info("Pipeline root: %s", PIPELINE_ROOT)
         LOGGER.info("Run directory: %s", run_dir)
 

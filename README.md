@@ -49,6 +49,56 @@ git clone https://github.com/ESAOpenSR/opensr-model.git
 git clone https://github.com/Lavreniuk/Delineate-Anything.git
 ```
 
+## Conda Environment
+
+Run the pipeline from one shared conda environment. The orchestrator imports S2Mosaic, Earth Engine/geemap, OpenSR, and Delineate-Anything code, so separate per-repo environments will fail when a later step imports a package that is missing from the active environment.
+
+Create the base environment with GDAL/geospatial packages:
+
+```bash
+conda env create -f field_delineation_pipeline/environment.yml
+conda activate field-delineation
+```
+
+Install GPU PyTorch for the H100 machine, then verify CUDA:
+
+```bash
+python -m pip install --index-url https://download.pytorch.org/whl/cu124 torch torchvision torchaudio
+python - <<'PY'
+import torch
+print(torch.__version__)
+print(torch.cuda.is_available())
+print(torch.cuda.device_count())
+print(torch.cuda.get_device_name(0) if torch.cuda.is_available() else "no cuda")
+PY
+```
+
+If you already have a conda env with GDAL, install the missing LCLU packages directly:
+
+```bash
+conda activate geo_clean
+conda install -c conda-forge geemap earthengine-api -y
+```
+
+If conda cannot solve quickly, use pip inside the active conda env:
+
+```bash
+python -m pip install geemap earthengine-api
+```
+
+Authenticate Earth Engine once if needed:
+
+```bash
+python - <<'PY'
+import ee
+ee.Authenticate(auth_mode="notebook")
+ee.Initialize(project="agriculture-486211")
+print("earth engine ok")
+PY
+```
+
+On a workstation with a browser, `--ee-auth-mode localhost` is also fine. On a headless server without `gcloud`, use `notebook`.
+
 ## Quick Start
 
 First validate that your AOI intersects the expected tile:
