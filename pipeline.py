@@ -42,6 +42,12 @@ REPO_SPECS = {
     "Delineate-Anything": "https://github.com/Lavreniuk/Delineate-Anything.git",
 }
 
+REPO_MARKERS = {
+    "S2Mosaic": "s2mosaic/__init__.py",
+    "opensr-model": "opensr_model/__init__.py",
+    "Delineate-Anything": "delineate.py",
+}
+
 LOGGER = logging.getLogger("field_delineation_pipeline")
 
 
@@ -217,12 +223,26 @@ def timed_step(summary: dict[str, Any], run_dir: Path, name: str) -> Iterable[No
 def ensure_repositories(clone_missing: bool) -> None:
     for repo_name, repo_url in REPO_SPECS.items():
         repo_path = PIPELINE_ROOT / repo_name
-        if repo_path.exists():
+        marker_path = repo_path / REPO_MARKERS[repo_name]
+        if marker_path.exists():
             continue
+
         if not clone_missing:
             raise FileNotFoundError(
-                f"Missing {repo_name} at {repo_path}. Re-run with --clone-missing to clone {repo_url}."
+                f"Missing or incomplete {repo_name} at {repo_path}. "
+                f"Re-run with --clone-missing to clone {repo_url}, or initialize Git submodules."
             )
+
+        if repo_path.exists() and not repo_path.is_dir():
+            raise FileExistsError(f"Expected {repo_path} to be a directory, but it is a file.")
+
+        if repo_path.exists() and any(repo_path.iterdir()):
+            raise FileExistsError(
+                f"{repo_path} exists but does not look like a complete {repo_name} checkout. "
+                "It is not empty, so the pipeline will not overwrite it. "
+                "Initialize submodules or move/remove that directory manually."
+            )
+
         LOGGER.info("Cloning %s from %s", repo_name, repo_url)
         subprocess.run(["git", "clone", repo_url, str(repo_path)], check=True)
 

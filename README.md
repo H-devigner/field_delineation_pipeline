@@ -12,6 +12,43 @@ This folder contains one orchestrated pipeline for the workflow you were running
 
 The main entrypoint is [pipeline.py](/Users/houcine/Desktop/from_oci/field_delineation_pipeline/pipeline.py).
 
+## Component Repos After Cloning
+
+`S2Mosaic`, `opensr-model`, and `Delineate-Anything` are separate Git repositories. A parent Git repository will not automatically copy their contents unless you either clone submodules or let the pipeline clone them.
+
+If they were added as Git submodules, clone with:
+
+```bash
+git clone --recurse-submodules <YOUR_PIPELINE_REPO_URL>
+```
+
+For an already-cloned repo:
+
+```bash
+git submodule update --init --recursive
+```
+
+If you did not configure submodules, let the pipeline fill missing or empty component folders:
+
+```bash
+./.venv/bin/python field_delineation_pipeline/pipeline.py \
+  --aoi /path/to/small_aoi.geojson \
+  --start-date 2025-07-01 \
+  --end-date 2025-12-31 \
+  --run-name repo_setup_check \
+  --tiles-only \
+  --clone-missing
+```
+
+Equivalent manual clone commands:
+
+```bash
+cd field_delineation_pipeline
+git clone https://github.com/DPIRD-DMA/S2Mosaic.git
+git clone https://github.com/ESAOpenSR/opensr-model.git
+git clone https://github.com/Lavreniuk/Delineate-Anything.git
+```
+
 ## Quick Start
 
 First validate that your AOI intersects the expected tile:
