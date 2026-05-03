@@ -2,8 +2,8 @@
 
 This folder contains one orchestrated pipeline for the workflow you were running manually:
 
-1. find Sentinel-2 MGRS tiles intersecting an AOI
-2. build S2 mosaics for a date range with `S2Mosaic`
+1. find Sentinel-2 MGRS tiles intersecting an AOI, or ingest XYZ basemap image tiles
+2. build S2 mosaics for a date range with `S2Mosaic`, or convert basemap PNG/JPEG tiles to GeoTIFF
 3. clip mosaics to the AOI by default
 4. download Dynamic World LCLU masks with Earth Engine
 5. run `opensr-model` super-resolution
@@ -173,6 +173,59 @@ Then run the full single-tile test:
 
 If Earth Engine authentication is not already configured on the machine, add `--ee-authenticate` once.
 
+## Basemap / XYZ Tile Mode
+
+Use this mode when you already have high-resolution basemap tiles, or when you have permission to download them from an XYZ tile endpoint. The pipeline mosaics the image tiles into an EPSG:3857 GeoTIFF, clips it to the AOI, stages it as `sr.tif`, and then continues into LCLU masks, Delineate-Anything, and exports.
+
+Local tile folder layouts supported:
+
+```text
+tiles/<z>/<x>/<y>.png
+tiles/<x>/<y>.png   # pass --xyz-zoom
+```
+
+Convert local tiles without the full pipeline:
+
+```bash
+python basemap_tiles.py convert \
+  --tiles-root /path/to/tiles \
+  --zoom 18 \
+  --output runs/basemap_debug/basemap_3857.tif \
+  --overwrite
+```
+
+Run the full pipeline from local XYZ tiles:
+
+```bash
+python pipeline.py \
+  --input-mode xyz_tiles \
+  --aoi /path/to/aoi.geojson \
+  --start-date 2025-07-01 \
+  --end-date 2025-12-31 \
+  --run-name basemap_aoi_full \
+  --xyz-tiles-root /path/to/tiles \
+  --xyz-zoom 18 \
+  --xyz-name basemap_aoi \
+  --ee-project agriculture-486211 \
+  --gpus 0,1,2,3,4,5,6,7 \
+  --resume
+```
+
+Download XYZ tiles for an AOI and convert them. Check the provider's usage terms first; many basemap endpoints restrict bulk downloading.
+
+```bash
+python basemap_tiles.py download \
+  --url-template 'https://tiles.example.com/{z}/{x}/{y}.png' \
+  --aoi /path/to/aoi.geojson \
+  --zoom 18 \
+  --output-root runs/basemap_download/tiles \
+  --max-tiles 2000 \
+  --sleep-seconds 0.05 \
+  --convert-output runs/basemap_download/basemap_3857.tif
+```
+
+The same download can be embedded in the orchestrator by passing `--xyz-url-template`. Basemap inputs skip OpenSR by default because they are already high resolution; pass `--basemap-run-super-resolution` only for experiments.
+
 ## Outputs
 
 Each run writes a self-contained run folder:
@@ -180,7 +233,9 @@ Each run writes a self-contained run folder:
 ```text
 field_delineation_pipeline/runs/<run_name>/
   00_aoi/aoi.geojson
+  00_basemap_tiles/                 # only when --xyz-url-template downloads tiles
   01_mosaics/<tile_id>/*.tif
+  01_basemap_geotiff/<xyz_name>.tif # only for --input-mode xyz_tiles
   02_clipped_mosaics/<tile_id>.tif
   03_lclu_masks/<tile_id>.tif
   04_super_resolution/<tile_id>/sr.tif
@@ -216,6 +271,8 @@ Use `--stage-mode symlink` for large country runs if you want to avoid duplicati
 `load_aoi`: reads GeoJSON, Shapefile, GPKG, or WKT AOIs and normalizes CRS.
 
 `discover_intersecting_tiles`: uses the Sentinel-2 grid and writes tile manifests. The default grid is `S2Mosaic/s2mosaic/sentinel_2_index.gpkg`.
+
+`basemap_tiles`: downloads XYZ tiles for an AOI and mosaics local PNG/JPEG/WebP/TIFF tiles into EPSG:3857 GeoTIFFs.
 
 `run_mosaic`: calls the local `S2Mosaic.mosaic` function with date range, tile ID, bands, cloud settings, and GPU-friendly OmniCloudMask settings.
 

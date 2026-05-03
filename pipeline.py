@@ -3,8 +3,8 @@
 End-to-end field delineation pipeline orchestrator.
 
 The pipeline is intentionally modular:
-1. find Sentinel-2 MGRS tiles intersecting an AOI
-2. mosaic each tile with S2Mosaic
+1. find Sentinel-2 MGRS tiles intersecting an AOI, or ingest XYZ basemap image tiles
+2. mosaic each Sentinel-2 tile with S2Mosaic, or convert basemap tiles to GeoTIFF
 3. optionally clip mosaics to the AOI
 4. download Dynamic World LCLU masks
 5. run OpenSR super-resolution or stage the mosaic directly
@@ -65,7 +65,13 @@ LOGGER = logging.getLogger("field_delineation_pipeline")
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Run Sentinel-2 mosaic, LCLU mask, OpenSR, and Delineate-Anything as one pipeline."
+        description="Run Sentinel-2 or basemap-tile ingestion, LCLU mask, OpenSR/staging, and Delineate-Anything as one pipeline."
+    )
+    parser.add_argument(
+        "--input-mode",
+        default="sentinel2",
+        choices=["sentinel2", "xyz_tiles"],
+        help="Use Sentinel-2/S2Mosaic inputs or XYZ basemap image tiles converted to GeoTIFF.",
     )
     parser.add_argument("--aoi", required=True, type=Path, help="AOI file: GeoJSON/Shapefile/GPKG or WKT text.")
     parser.add_argument("--start-date", required=True, help="Inclusive start date, YYYY-MM-DD.")
@@ -80,6 +86,27 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--overwrite", action="store_true", help="Overwrite existing intermediate outputs.")
     parser.add_argument("--resume", action="store_true", help="Reuse existing intermediates when possible.")
     parser.add_argument("--tiles-only", action="store_true", help="Stop after AOI/tile intersection manifests are written.")
+
+    basemap = parser.add_argument_group("XYZ basemap tiles")
+    basemap.add_argument("--xyz-name", default="basemap", help="Pseudo tile ID used for basemap pipeline outputs.")
+    basemap.add_argument("--xyz-tiles-root", default=None, type=Path, help="Local XYZ tile root. Supports z/x/y.png or x/y.png with --xyz-zoom.")
+    basemap.add_argument("--xyz-url-template", default=None, help="Optional XYZ URL template, e.g. https://server/{z}/{x}/{y}.png")
+    basemap.add_argument("--xyz-zoom", default=None, type=int, help="XYZ zoom to download or select from the local tile root.")
+    basemap.add_argument("--xyz-extension", default="png", help="Downloaded tile extension when --xyz-url-template is used.")
+    basemap.add_argument("--xyz-timeout", default=60, type=int, help="HTTP timeout per downloaded basemap tile.")
+    basemap.add_argument("--xyz-sleep-seconds", default=0.0, type=float, help="Delay between downloaded basemap tile requests.")
+    basemap.add_argument("--xyz-user-agent", default="field-delineation-pipeline/1.0", help="User-Agent for basemap tile requests.")
+    basemap.add_argument(
+        "--xyz-max-download-tiles",
+        default=5000,
+        type=int,
+        help="Safety cap for basemap tile downloads. Increase only after checking provider terms and storage.",
+    )
+    basemap.add_argument(
+        "--basemap-run-super-resolution",
+        action="store_true",
+        help="Experimental: run OpenSR on basemap GeoTIFFs. By default basemap inputs skip OpenSR because they are already high resolution.",
+    )
 
     mosaic = parser.add_argument_group("S2Mosaic")
     mosaic.add_argument("--mosaic-method", default="max_ndvi", choices=["mean", "first", "median", "percentile", "max_ndvi"])
@@ -252,8 +279,10 @@ def timed_step(summary: dict[str, Any], run_dir: Path, name: str) -> Iterable[No
         LOGGER.info("DONE %s in %.1fs", name, elapsed)
 
 
-def ensure_repositories(clone_missing: bool) -> None:
+def ensure_repositories(clone_missing: bool, required_repositories: set[str] | None = None) -> None:
     for repo_name, repo_spec in REPO_SPECS.items():
+        if required_repositories is not None and repo_name not in required_repositories:
+            continue
         repo_url = repo_spec["url"]
         repo_branch = repo_spec["branch"]
         repo_path = PIPELINE_ROOT / repo_name
@@ -370,6 +399,17 @@ def ensure_repository_branch(
     )
 
 
+def required_component_repositories(args: argparse.Namespace) -> set[str]:
+    required: set[str] = set()
+    if args.input_mode == "sentinel2":
+        required.add("S2Mosaic")
+    if not args.tiles_only:
+        required.add("Delineate-Anything")
+    if not args.skip_super_resolution:
+        required.add("opensr-model")
+    return required
+
+
 def check_imports(requirements: dict[str, str]) -> list[str]:
     missing = []
     for import_name, package_name in requirements.items():
@@ -381,10 +421,13 @@ def check_imports(requirements: dict[str, str]) -> list[str]:
 def check_python_environment(args: argparse.Namespace) -> None:
     requirements = {
         "geopandas": "geopandas",
+        "numpy": "numpy",
         "rasterio": "rasterio",
         "shapely": "shapely",
         "yaml": "PyYAML",
     }
+    if args.input_mode == "xyz_tiles" and args.xyz_url_template:
+        requirements["requests"] = "requests"
     if not args.skip_lclu:
         requirements.update(
             {
@@ -693,6 +736,32 @@ def discover_intersecting_tiles(
     return intersecting
 
 
+def discover_basemap_input(
+    *,
+    aoi: Any,
+    tile_id: str,
+    output_dir: Path,
+) -> Any:
+    """Create a one-row pseudo tile manifest for basemap input mode."""
+
+    gpd, _, _ = import_geospatial_stack()
+    aoi_wgs84 = aoi.to_crs("EPSG:4326")
+    geometry = union_geometry(aoi_wgs84)
+    basemap_tile = gpd.GeoDataFrame({"tile_id": [tile_id]}, geometry=[geometry], crs="EPSG:4326")
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    manifest_geojson = output_dir / "intersecting_tiles.geojson"
+    manifest_csv = output_dir / "intersecting_tiles.csv"
+    basemap_tile.to_file(manifest_geojson, driver="GeoJSON")
+    with manifest_csv.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=["tile_id"])
+        writer.writeheader()
+        writer.writerow({"tile_id": tile_id})
+
+    LOGGER.info("Basemap input mode uses pseudo tile '%s' for the AOI.", tile_id)
+    return basemap_tile
+
+
 def import_s2mosaic() -> Any:
     if str(S2MOSAIC_ROOT) not in sys.path:
         sys.path.insert(0, str(S2MOSAIC_ROOT))
@@ -747,6 +816,53 @@ def run_mosaic(
     return Path(result)
 
 
+def prepare_basemap_geotiff(
+    *,
+    aoi: Any,
+    output_tif: Path,
+    run_dir: Path,
+    args: argparse.Namespace,
+) -> Path:
+    if output_tif.exists() and not args.overwrite and args.resume:
+        LOGGER.info("Reusing basemap GeoTIFF: %s", output_tif)
+        return output_tif
+
+    try:
+        from basemap_tiles import convert_xyz_tiles_to_geotiff, download_xyz_tiles
+    except ImportError as exc:
+        raise ImportError("Could not import basemap_tiles.py from the pipeline folder.") from exc
+
+    tiles_root = args.xyz_tiles_root
+    if args.xyz_url_template:
+        if args.xyz_zoom is None:
+            raise ValueError("--xyz-zoom is required when --xyz-url-template is used.")
+        if tiles_root is None:
+            tiles_root = run_dir / "00_basemap_tiles"
+        bounds = tuple(float(value) for value in aoi.to_crs("EPSG:4326").total_bounds)
+        download_xyz_tiles(
+            url_template=args.xyz_url_template,
+            output_root=tiles_root,
+            bounds_wgs84=bounds,
+            zoom=args.xyz_zoom,
+            extension=args.xyz_extension,
+            timeout=args.xyz_timeout,
+            sleep_seconds=args.xyz_sleep_seconds,
+            overwrite=args.overwrite,
+            user_agent=args.xyz_user_agent,
+            max_tiles=args.xyz_max_download_tiles,
+        )
+
+    if tiles_root is None:
+        raise ValueError("Basemap input mode requires --xyz-tiles-root or --xyz-url-template.")
+
+    return convert_xyz_tiles_to_geotiff(
+        tiles_root=tiles_root,
+        output_tif=output_tif,
+        zoom=args.xyz_zoom,
+        overwrite=args.overwrite,
+    )
+
+
 def clip_raster_to_aoi(
     *,
     input_tif: Path,
@@ -766,24 +882,34 @@ def clip_raster_to_aoi(
         raise ImportError("Install rasterio before clipping mosaics.") from exc
 
     output_tif.parent.mkdir(parents=True, exist_ok=True)
+    tmp_tif = output_tif.with_suffix(".tmp.tif")
+    tmp_tif.unlink(missing_ok=True)
+    if output_tif.exists() and overwrite:
+        output_tif.unlink()
     with rasterio.open(input_tif) as src:
         aoi_src = aoi.to_crs(src.crs)
         geometry = union_geometry(aoi_src)
         data, transform = mask(src, [mapping(geometry)], crop=True, nodata=src.nodata if src.nodata is not None else 0)
         profile = src.profile.copy()
+        profile.pop("blockxsize", None)
+        profile.pop("blockysize", None)
         profile.update(
             height=data.shape[1],
             width=data.shape[2],
             transform=transform,
             compress="lzw",
-            tiled=True,
             BIGTIFF="IF_SAFER",
         )
+        if data.shape[1] >= 256 and data.shape[2] >= 256:
+            profile.update(tiled=True, blockxsize=256, blockysize=256)
+        else:
+            profile.update(tiled=False)
         descriptions = src.descriptions
-        with rasterio.open(output_tif, "w", **profile) as dst:
+        with rasterio.open(tmp_tif, "w", **profile) as dst:
             dst.write(data)
             if descriptions and any(descriptions):
                 dst.descriptions = descriptions
+    tmp_tif.replace(output_tif)
     return output_tif
 
 
@@ -1311,6 +1437,15 @@ def save_aoi_copy(aoi: Any, output_path: Path) -> None:
 
 def main() -> None:
     args = parse_args()
+    if args.input_mode == "xyz_tiles" and not args.skip_super_resolution and not args.basemap_run_super_resolution:
+        args.skip_super_resolution = True
+        args.basemap_auto_skipped_super_resolution = True
+    else:
+        args.basemap_auto_skipped_super_resolution = False
+
+    if args.input_mode == "xyz_tiles" and args.xyz_zoom is not None and args.xyz_zoom < 0:
+        raise ValueError("--xyz-zoom must be non-negative.")
+
     start_date = parse_date(args.start_date)
     end_date = parse_date(args.end_date)
     if end_date <= start_date:
@@ -1335,22 +1470,33 @@ def main() -> None:
     dump_json(run_dir / "manifests" / "args.json", summary["args"])
 
     with timed_step(summary, run_dir, "preflight"):
-        ensure_repositories(args.clone_missing)
+        ensure_repositories(args.clone_missing, required_component_repositories(args))
         check_python_environment(args)
+        if args.basemap_auto_skipped_super_resolution:
+            LOGGER.info("Basemap input is already high-resolution imagery; OpenSR is skipped unless --basemap-run-super-resolution is set.")
         LOGGER.info("Pipeline root: %s", PIPELINE_ROOT)
         LOGGER.info("Run directory: %s", run_dir)
 
     with timed_step(summary, run_dir, "aoi_and_tile_discovery"):
         aoi = load_aoi(args.aoi)
         save_aoi_copy(aoi, run_dir / "00_aoi" / "aoi.geojson")
-        tiles = discover_intersecting_tiles(
-            aoi=aoi,
-            tile_grid_path=args.tile_grid,
-            tile_id_column=args.tile_id_column,
-            include_tiles=parse_csv(args.include_tiles),
-            max_tiles=args.max_tiles,
-            output_dir=run_dir / "manifests",
-        )
+        if args.input_mode == "sentinel2":
+            tiles = discover_intersecting_tiles(
+                aoi=aoi,
+                tile_grid_path=args.tile_grid,
+                tile_id_column=args.tile_id_column,
+                include_tiles=parse_csv(args.include_tiles),
+                max_tiles=args.max_tiles,
+                output_dir=run_dir / "manifests",
+            )
+        else:
+            if parse_csv(args.include_tiles) and args.xyz_name not in parse_csv(args.include_tiles):
+                raise ValueError(f"--include-tiles was provided, but basemap pseudo tile is '{args.xyz_name}'.")
+            tiles = discover_basemap_input(
+                aoi=aoi,
+                tile_id=args.xyz_name,
+                output_dir=run_dir / "manifests",
+            )
 
     if args.tiles_only:
         summary["finished_at"] = dt.datetime.now(dt.timezone.utc).isoformat()
@@ -1373,13 +1519,21 @@ def main() -> None:
             lclu_geom_wgs84 = aoi_geom_wgs84
 
         with timed_step(summary, run_dir, f"mosaic_{tile_id}"):
-            mosaic_path = run_mosaic(
-                tile_id=tile_id,
-                start_date=start_date,
-                end_date=end_date,
-                output_dir=run_dir / "01_mosaics" / tile_id,
-                args=args,
-            )
+            if args.input_mode == "sentinel2":
+                mosaic_path = run_mosaic(
+                    tile_id=tile_id,
+                    start_date=start_date,
+                    end_date=end_date,
+                    output_dir=run_dir / "01_mosaics" / tile_id,
+                    args=args,
+                )
+            else:
+                mosaic_path = prepare_basemap_geotiff(
+                    aoi=aoi,
+                    output_tif=run_dir / "01_basemap_geotiff" / f"{tile_id}.tif",
+                    run_dir=run_dir,
+                    args=args,
+                )
 
         with timed_step(summary, run_dir, f"clip_{tile_id}"):
             if args.clip_to_aoi:
