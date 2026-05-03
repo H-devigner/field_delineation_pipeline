@@ -211,7 +211,38 @@ python pipeline.py \
   --resume
 ```
 
-Download XYZ tiles for an AOI and convert them. Check the provider's usage terms first; many basemap endpoints restrict bulk downloading.
+Download OpenAerialMap tiles for an AOI and convert them. Coverage depends on whether OpenAerialMap has open imagery for the area.
+
+```bash
+python basemap_tiles.py download \
+  --provider openaerialmap \
+  --aoi /path/to/aoi.geojson \
+  --zoom 18 \
+  --output-root runs/basemap_download/tiles \
+  --max-tiles 2000 \
+  --sleep-seconds 0.05 \
+  --convert-output runs/basemap_download/basemap_3857.tif
+```
+
+Run the full orchestrator by letting it download OpenAerialMap tiles first:
+
+```bash
+python pipeline.py \
+  --input-mode xyz_tiles \
+  --aoi /path/to/aoi.geojson \
+  --start-date 2025-07-01 \
+  --end-date 2025-12-31 \
+  --run-name oam_basemap_aoi_full \
+  --xyz-provider openaerialmap \
+  --xyz-zoom 18 \
+  --xyz-name oam_basemap \
+  --xyz-max-download-tiles 2000 \
+  --xyz-sleep-seconds 0.05 \
+  --ee-project agriculture-486211 \
+  --resume
+```
+
+For a custom licensed endpoint, pass a URL template directly. Check the provider's usage terms first; many basemap endpoints restrict bulk downloading.
 
 ```bash
 python basemap_tiles.py download \
@@ -224,7 +255,7 @@ python basemap_tiles.py download \
   --convert-output runs/basemap_download/basemap_3857.tif
 ```
 
-The same download can be embedded in the orchestrator by passing `--xyz-url-template`. Basemap inputs skip OpenSR by default because they are already high resolution; pass `--basemap-run-super-resolution` only for experiments.
+The same custom download can be embedded in the orchestrator by passing `--xyz-url-template`. Basemap inputs skip OpenSR by default because they are already high resolution; pass `--basemap-run-super-resolution` only for experiments.
 
 ## Outputs
 

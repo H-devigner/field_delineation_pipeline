@@ -19,6 +19,13 @@ WEB_MERCATOR_LIMIT = 85.0511287798066
 WEB_MERCATOR_RADIUS = 6378137.0
 WEB_MERCATOR_ORIGIN_SHIFT = math.pi * WEB_MERCATOR_RADIUS
 SUPPORTED_TILE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp", ".tif", ".tiff"}
+XYZ_PROVIDER_SPECS: dict[str, dict[str, str]] = {
+    "openaerialmap": {
+        "url_template": "https://apps.kontur.io/raster-tiler/oam/mosaic/{z}/{x}/{y}.png",
+        "attribution": "OpenAerialMap / Open Imagery Network contributors; mosaic tiles by Kontur.",
+        "notes": "Open imagery coverage varies by AOI. Use small AOIs and keep attribution with derived outputs.",
+    },
+}
 
 LOGGER = logging.getLogger("basemap_tiles")
 
@@ -33,6 +40,22 @@ class XYZTile:
 
 def clamp(value: float, lower: float, upper: float) -> float:
     return max(lower, min(upper, value))
+
+
+def resolve_xyz_url_template(provider: str | None = None, url_template: str | None = None) -> str | None:
+    if url_template:
+        return url_template
+    if provider is None:
+        return None
+    if provider not in XYZ_PROVIDER_SPECS:
+        raise ValueError(f"Unknown XYZ provider '{provider}'. Choose one of: {', '.join(sorted(XYZ_PROVIDER_SPECS))}")
+    return XYZ_PROVIDER_SPECS[provider]["url_template"]
+
+
+def xyz_provider_attribution(provider: str | None) -> str | None:
+    if provider is None:
+        return None
+    return XYZ_PROVIDER_SPECS.get(provider, {}).get("attribution")
 
 
 def lonlat_to_xyz(lon: float, lat: float, zoom: int) -> tuple[int, int]:
@@ -280,6 +303,7 @@ def download_xyz_tiles(
     output_root: Path,
     bounds_wgs84: tuple[float, float, float, float],
     zoom: int,
+    provider: str | None = None,
     extension: str = "png",
     timeout: int = 60,
     sleep_seconds: float = 0.0,
@@ -334,7 +358,16 @@ def download_xyz_tiles(
         writer.writeheader()
         writer.writerows(manifest_rows)
     with (output_root / "download_manifest.json").open("w", encoding="utf-8") as handle:
-        json.dump({"tiles": manifest_rows}, handle, indent=2)
+        json.dump(
+            {
+                "provider": provider,
+                "attribution": xyz_provider_attribution(provider),
+                "url_template": url_template,
+                "tiles": manifest_rows,
+            },
+            handle,
+            indent=2,
+        )
 
     return downloaded
 
@@ -358,7 +391,8 @@ def build_parser() -> argparse.ArgumentParser:
     convert.add_argument("--overwrite", action="store_true")
 
     download = subparsers.add_parser("download", help="Download XYZ tiles for an AOI.")
-    download.add_argument("--url-template", required=True, help="Example: https://server/{z}/{x}/{y}.png")
+    download.add_argument("--provider", default=None, choices=sorted(XYZ_PROVIDER_SPECS), help="Built-in free/open imagery provider preset.")
+    download.add_argument("--url-template", default=None, help="Example: https://server/{z}/{x}/{y}.png")
     download.add_argument("--aoi", required=True, type=Path)
     download.add_argument("--zoom", required=True, type=int)
     download.add_argument("--output-root", required=True, type=Path)
@@ -369,6 +403,9 @@ def build_parser() -> argparse.ArgumentParser:
     download.add_argument("--user-agent", default="field-delineation-pipeline/1.0")
     download.add_argument("--max-tiles", default=5000, type=int)
     download.add_argument("--convert-output", default=None, type=Path, help="Optional GeoTIFF to create after download.")
+
+    providers = subparsers.add_parser("providers", help="List built-in XYZ provider presets.")
+    providers.set_defaults(command="providers")
     return parser
 
 
@@ -386,12 +423,24 @@ def main(argv: Iterable[str] | None = None) -> None:
         )
         return
 
+    if args.command == "providers":
+        for provider, spec in sorted(XYZ_PROVIDER_SPECS.items()):
+            print(f"{provider}")
+            print(f"  url_template: {spec['url_template']}")
+            print(f"  attribution: {spec['attribution']}")
+            print(f"  notes: {spec['notes']}")
+        return
+
     bounds = load_aoi_bounds_wgs84(args.aoi)
+    url_template = resolve_xyz_url_template(args.provider, args.url_template)
+    if url_template is None:
+        raise ValueError("Download mode requires either --provider or --url-template.")
     download_xyz_tiles(
-        url_template=args.url_template,
+        url_template=url_template,
         output_root=args.output_root,
         bounds_wgs84=bounds,
         zoom=args.zoom,
+        provider=args.provider,
         extension=args.extension,
         timeout=args.timeout,
         sleep_seconds=args.sleep_seconds,

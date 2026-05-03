@@ -90,6 +90,7 @@ def parse_args() -> argparse.Namespace:
     basemap = parser.add_argument_group("XYZ basemap tiles")
     basemap.add_argument("--xyz-name", default="basemap", help="Pseudo tile ID used for basemap pipeline outputs.")
     basemap.add_argument("--xyz-tiles-root", default=None, type=Path, help="Local XYZ tile root. Supports z/x/y.png or x/y.png with --xyz-zoom.")
+    basemap.add_argument("--xyz-provider", default=None, choices=["openaerialmap"], help="Built-in free/open XYZ imagery provider preset.")
     basemap.add_argument("--xyz-url-template", default=None, help="Optional XYZ URL template, e.g. https://server/{z}/{x}/{y}.png")
     basemap.add_argument("--xyz-zoom", default=None, type=int, help="XYZ zoom to download or select from the local tile root.")
     basemap.add_argument("--xyz-extension", default="png", help="Downloaded tile extension when --xyz-url-template is used.")
@@ -426,7 +427,7 @@ def check_python_environment(args: argparse.Namespace) -> None:
         "shapely": "shapely",
         "yaml": "PyYAML",
     }
-    if args.input_mode == "xyz_tiles" and args.xyz_url_template:
+    if args.input_mode == "xyz_tiles" and (args.xyz_url_template or args.xyz_provider):
         requirements["requests"] = "requests"
     if not args.skip_lclu:
         requirements.update(
@@ -828,22 +829,24 @@ def prepare_basemap_geotiff(
         return output_tif
 
     try:
-        from basemap_tiles import convert_xyz_tiles_to_geotiff, download_xyz_tiles
+        from basemap_tiles import convert_xyz_tiles_to_geotiff, download_xyz_tiles, resolve_xyz_url_template
     except ImportError as exc:
         raise ImportError("Could not import basemap_tiles.py from the pipeline folder.") from exc
 
     tiles_root = args.xyz_tiles_root
-    if args.xyz_url_template:
+    url_template = resolve_xyz_url_template(args.xyz_provider, args.xyz_url_template)
+    if url_template:
         if args.xyz_zoom is None:
-            raise ValueError("--xyz-zoom is required when --xyz-url-template is used.")
+            raise ValueError("--xyz-zoom is required when --xyz-provider or --xyz-url-template is used.")
         if tiles_root is None:
             tiles_root = run_dir / "00_basemap_tiles"
         bounds = tuple(float(value) for value in aoi.to_crs("EPSG:4326").total_bounds)
         download_xyz_tiles(
-            url_template=args.xyz_url_template,
+            url_template=url_template,
             output_root=tiles_root,
             bounds_wgs84=bounds,
             zoom=args.xyz_zoom,
+            provider=args.xyz_provider,
             extension=args.xyz_extension,
             timeout=args.xyz_timeout,
             sleep_seconds=args.xyz_sleep_seconds,
