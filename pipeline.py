@@ -105,6 +105,9 @@ def parse_args() -> argparse.Namespace:
     lclu.add_argument("--lclu-scale", default=10, type=int)
     lclu.add_argument("--lclu-crs", default="EPSG:4326")
     lclu.add_argument("--lclu-collection", default="GOOGLE/DYNAMICWORLD/V1")
+    lclu.add_argument("--lclu-num-threads", default=1, type=int, help="Threads for geemap/geedim LCLU download.")
+    lclu.add_argument("--lclu-max-tile-size", default=16, type=int, help="Max geedim tile size in MB.")
+    lclu.add_argument("--lclu-max-tile-dim", default=1024, type=int, help="Max geedim tile width/height in pixels.")
 
     sr = parser.add_argument_group("OpenSR")
     sr.add_argument("--skip-super-resolution", action="store_true", help="Stage the mosaic as sr.tif without OpenSR.")
@@ -828,6 +831,9 @@ def download_dynamic_world_mask(
         scale=args.lclu_scale,
         region=geometry,
         crs=args.lclu_crs,
+        num_threads=args.lclu_num_threads,
+        max_tile_size=args.lclu_max_tile_size,
+        max_tile_dim=args.lclu_max_tile_dim,
     )
     tmp_tif.replace(output_tif)
     return output_tif
