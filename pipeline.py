@@ -37,9 +37,18 @@ DELINEATE_ROOT = PIPELINE_ROOT / "Delineate-Anything"
 DEFAULT_TILE_GRID = S2MOSAIC_ROOT / "s2mosaic" / "sentinel_2_index.gpkg"
 
 REPO_SPECS = {
-    "S2Mosaic": "https://github.com/DPIRD-DMA/S2Mosaic.git",
-    "opensr-model": "https://github.com/ESAOpenSR/opensr-model.git",
-    "Delineate-Anything": "https://github.com/Lavreniuk/Delineate-Anything.git",
+    "S2Mosaic": {
+        "url": "https://github.com/H-devigner/S2Mosaic.git",
+        "branch": "field-delineation-pipeline",
+    },
+    "opensr-model": {
+        "url": "https://github.com/ESAOpenSR/opensr-model.git",
+        "branch": None,
+    },
+    "Delineate-Anything": {
+        "url": "https://github.com/Lavreniuk/Delineate-Anything.git",
+        "branch": None,
+    },
 }
 
 REPO_MARKERS = {
@@ -221,16 +230,34 @@ def timed_step(summary: dict[str, Any], run_dir: Path, name: str) -> Iterable[No
 
 
 def ensure_repositories(clone_missing: bool) -> None:
-    for repo_name, repo_url in REPO_SPECS.items():
+    for repo_name, repo_spec in REPO_SPECS.items():
+        repo_url = repo_spec["url"]
+        repo_branch = repo_spec["branch"]
         repo_path = PIPELINE_ROOT / repo_name
         marker_path = repo_path / REPO_MARKERS[repo_name]
         if marker_path.exists():
+            if repo_branch:
+                branch_result = subprocess.run(
+                    ["git", "-C", str(repo_path), "branch", "--show-current"],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                current_branch = branch_result.stdout.strip()
+                if branch_result.returncode == 0 and current_branch != repo_branch:
+                    LOGGER.warning(
+                        "%s exists on branch '%s'; expected '%s'. Existing checkout will be used.",
+                        repo_name,
+                        current_branch or "<detached>",
+                        repo_branch,
+                    )
             continue
 
         if not clone_missing:
             raise FileNotFoundError(
                 f"Missing or incomplete {repo_name} at {repo_path}. "
-                f"Re-run with --clone-missing to clone {repo_url}, or initialize Git submodules."
+                f"Re-run with --clone-missing to clone {repo_url}"
+                f"{' branch ' + repo_branch if repo_branch else ''}, or initialize Git submodules."
             )
 
         if repo_path.exists() and not repo_path.is_dir():
@@ -243,8 +270,17 @@ def ensure_repositories(clone_missing: bool) -> None:
                 "Initialize submodules or move/remove that directory manually."
             )
 
-        LOGGER.info("Cloning %s from %s", repo_name, repo_url)
-        subprocess.run(["git", "clone", repo_url, str(repo_path)], check=True)
+        command = ["git", "clone"]
+        if repo_branch:
+            command.extend(["--branch", repo_branch, "--single-branch"])
+        command.extend([repo_url, str(repo_path)])
+        LOGGER.info(
+            "Cloning %s from %s%s",
+            repo_name,
+            repo_url,
+            f" branch {repo_branch}" if repo_branch else "",
+        )
+        subprocess.run(command, check=True)
 
 
 def import_geospatial_stack() -> tuple[Any, Any, Any]:

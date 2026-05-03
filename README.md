@@ -28,7 +28,7 @@ For an already-cloned repo:
 git submodule update --init --recursive
 ```
 
-If you did not configure submodules, let the pipeline fill missing or empty component folders:
+If you did not configure submodules, let the pipeline fill missing or empty component folders. By default it clones `S2Mosaic` from `https://github.com/H-devigner/S2Mosaic.git` on branch `field-delineation-pipeline`, and the other two component repos from their upstream defaults:
 
 ```bash
 ./.venv/bin/python field_delineation_pipeline/pipeline.py \
@@ -44,7 +44,7 @@ Equivalent manual clone commands:
 
 ```bash
 cd field_delineation_pipeline
-git clone https://github.com/DPIRD-DMA/S2Mosaic.git
+git clone --branch field-delineation-pipeline --single-branch https://github.com/H-devigner/S2Mosaic.git
 git clone https://github.com/ESAOpenSR/opensr-model.git
 git clone https://github.com/Lavreniuk/Delineate-Anything.git
 ```
