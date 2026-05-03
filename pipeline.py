@@ -20,6 +20,7 @@ import datetime as dt
 import importlib.util
 import json
 import logging
+import math
 import os
 import sqlite3
 import shutil
@@ -27,6 +28,7 @@ import subprocess
 import sys
 import time
 import traceback
+import zipfile
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -105,6 +107,9 @@ def parse_args() -> argparse.Namespace:
     lclu.add_argument("--lclu-scale", default=10, type=int)
     lclu.add_argument("--lclu-crs", default="EPSG:4326")
     lclu.add_argument("--lclu-collection", default="GOOGLE/DYNAMICWORLD/V1")
+    lclu.add_argument("--lclu-backend", default="direct", choices=["direct", "geemap"], help="LCLU download backend.")
+    lclu.add_argument("--lclu-direct-tile-degrees", default=0.15, type=float, help="Chunk size in degrees for direct EE LCLU downloads.")
+    lclu.add_argument("--lclu-request-timeout", default=300, type=int, help="HTTP timeout in seconds for direct EE LCLU downloads.")
     lclu.add_argument("--lclu-num-threads", default=1, type=int, help="Threads for geemap/geedim LCLU download.")
     lclu.add_argument("--lclu-max-tile-size", default=16, type=int, help="Max geedim tile size in MB.")
     lclu.add_argument("--lclu-max-tile-dim", default=1024, type=int, help="Max geedim tile width/height in pixels.")
@@ -377,6 +382,7 @@ def check_python_environment(args: argparse.Namespace) -> None:
             {
                 "ee": "earthengine-api",
                 "geemap": "geemap",
+                "requests": "requests",
             }
         )
     if not args.skip_super_resolution:
@@ -811,11 +817,15 @@ def download_dynamic_world_mask(
     if tmp_tif.exists():
         tmp_tif.unlink()
 
-    geometry_geojson = earth_engine_geojson_geometry(geometry_wgs84)
+    clean_geometry = force_2d_geometry(geometry_wgs84)
+    if not clean_geometry.is_valid:
+        clean_geometry = make_valid_geometry(clean_geometry)
+    clean_geometry = extract_polygonal_geometry(clean_geometry)
+    geometry_geojson = earth_engine_geojson_geometry(clean_geometry)
     LOGGER.info(
         "Downloading LCLU mask with EE geometry type=%s bounds=%s",
         geometry_geojson.get("type"),
-        geometry_wgs84.bounds,
+        clean_geometry.bounds,
     )
     geometry = ee.Geometry(geometry_geojson)
     dw_collection = (
@@ -825,17 +835,28 @@ def download_dynamic_world_mask(
     )
     dw_label = dw_collection.select("label").mode().clip(geometry).toUint8()
 
-    geemap.download_ee_image(
-        dw_label,
-        filename=str(tmp_tif),
-        scale=args.lclu_scale,
-        region=geometry,
-        crs=args.lclu_crs,
-        num_threads=args.lclu_num_threads,
-        max_tile_size=args.lclu_max_tile_size,
-        max_tile_dim=args.lclu_max_tile_dim,
-    )
-    tmp_tif.replace(output_tif)
+    if args.lclu_backend == "direct":
+        download_ee_image_direct_tiled(
+            image=dw_label,
+            geometry=clean_geometry,
+            output_tif=output_tif,
+            scale=args.lclu_scale,
+            crs=args.lclu_crs,
+            tile_degrees=args.lclu_direct_tile_degrees,
+            timeout=args.lclu_request_timeout,
+        )
+    else:
+        geemap.download_ee_image(
+            dw_label,
+            filename=str(tmp_tif),
+            scale=args.lclu_scale,
+            region=geometry,
+            crs=args.lclu_crs,
+            num_threads=args.lclu_num_threads,
+            max_tile_size=args.lclu_max_tile_size,
+            max_tile_dim=args.lclu_max_tile_dim,
+        )
+        tmp_tif.replace(output_tif)
     return output_tif
 
 
@@ -854,6 +875,152 @@ def copy_or_symlink(src: Path, dst: Path, mode: str, overwrite: bool) -> Path:
     else:
         shutil.copy2(src, dst)
     return dst
+
+
+def download_url_to_file(url: str, output_path: Path, timeout: int) -> None:
+    import requests
+
+    with requests.get(url, stream=True, timeout=timeout) as response:
+        response.raise_for_status()
+        with output_path.open("wb") as handle:
+            for chunk in response.iter_content(chunk_size=1024 * 1024):
+                if chunk:
+                    handle.write(chunk)
+
+
+def extract_tif_if_zip(download_path: Path, output_tif: Path) -> Path:
+    if not zipfile.is_zipfile(download_path):
+        if download_path != output_tif:
+            download_path.replace(output_tif)
+        return output_tif
+
+    with zipfile.ZipFile(download_path) as archive:
+        tif_names = [name for name in archive.namelist() if name.lower().endswith((".tif", ".tiff"))]
+        if not tif_names:
+            raise FileNotFoundError(f"No GeoTIFF found inside {download_path}")
+        with archive.open(tif_names[0]) as src, output_tif.open("wb") as dst:
+            shutil.copyfileobj(src, dst)
+    download_path.unlink(missing_ok=True)
+    return output_tif
+
+
+def download_ee_image_direct(
+    *,
+    image: Any,
+    ee_geometry: Any,
+    output_tif: Path,
+    scale: int,
+    crs: str,
+    timeout: int,
+) -> Path:
+    download_path = output_tif.with_suffix(".download")
+    download_path.unlink(missing_ok=True)
+    url = image.getDownloadURL(
+        {
+            "scale": scale,
+            "region": ee_geometry,
+            "crs": crs,
+            "format": "GEO_TIFF",
+        }
+    )
+    download_url_to_file(url, download_path, timeout)
+    extract_tif_if_zip(download_path, output_tif)
+    if not output_tif.exists() or output_tif.stat().st_size == 0:
+        raise RuntimeError(f"Direct EE download produced an empty file: {output_tif}")
+    return output_tif
+
+
+def download_ee_image_direct_tiled(
+    *,
+    image: Any,
+    geometry: Any,
+    output_tif: Path,
+    scale: int,
+    crs: str,
+    tile_degrees: float,
+    timeout: int,
+) -> Path:
+    import ee
+    import rasterio
+    from shapely.geometry import mapping
+    from rasterio.merge import merge
+    from shapely.geometry import box
+
+    if tile_degrees <= 0:
+        raise ValueError("--lclu-direct-tile-degrees must be positive")
+
+    output_tif.parent.mkdir(parents=True, exist_ok=True)
+    chunks_dir = output_tif.parent / f"{output_tif.stem}.chunks"
+    if chunks_dir.exists():
+        shutil.rmtree(chunks_dir)
+    chunks_dir.mkdir(parents=True)
+
+    minx, miny, maxx, maxy = geometry.bounds
+    nx = max(1, math.ceil((maxx - minx) / tile_degrees))
+    ny = max(1, math.ceil((maxy - miny) / tile_degrees))
+    chunk_paths: list[Path] = []
+    total = nx * ny
+    LOGGER.info("Direct EE LCLU download split into up to %d chunks (%dx%d).", total, nx, ny)
+
+    for ix in range(nx):
+        x0 = minx + ix * tile_degrees
+        x1 = min(maxx, x0 + tile_degrees)
+        for iy in range(ny):
+            y0 = miny + iy * tile_degrees
+            y1 = min(maxy, y0 + tile_degrees)
+            raw_chunk_geom = force_2d_geometry(geometry.intersection(box(x0, y0, x1, y1)))
+            if raw_chunk_geom.is_empty:
+                continue
+            try:
+                chunk_geom = extract_polygonal_geometry(raw_chunk_geom)
+            except ValueError:
+                continue
+            if chunk_geom.is_empty:
+                continue
+
+            chunk_geojson = json.loads(json.dumps(mapping(chunk_geom)))
+            ee_chunk_geom = ee.Geometry(chunk_geojson)
+            chunk_tif = chunks_dir / f"chunk_{ix:04d}_{iy:04d}.tif"
+            LOGGER.info("Downloading LCLU chunk %d/%d -> %s", len(chunk_paths) + 1, total, chunk_tif.name)
+            download_ee_image_direct(
+                image=image,
+                ee_geometry=ee_chunk_geom,
+                output_tif=chunk_tif,
+                scale=scale,
+                crs=crs,
+                timeout=timeout,
+            )
+            chunk_paths.append(chunk_tif)
+
+    if not chunk_paths:
+        raise RuntimeError("No non-empty chunks were generated for direct LCLU download.")
+
+    datasets = [rasterio.open(path) for path in chunk_paths]
+    try:
+        mosaic, transform = merge(datasets)
+        profile = datasets[0].profile.copy()
+        profile.update(
+            height=mosaic.shape[1],
+            width=mosaic.shape[2],
+            transform=transform,
+            count=mosaic.shape[0],
+            compress="lzw",
+            tiled=True,
+            BIGTIFF="IF_SAFER",
+        )
+        tmp_tif = output_tif.with_suffix(".tmp.tif")
+        tmp_tif.unlink(missing_ok=True)
+        with rasterio.open(tmp_tif, "w", **profile) as dst:
+            dst.write(mosaic)
+        tmp_tif.replace(output_tif)
+    finally:
+        for dataset in datasets:
+            dataset.close()
+        shutil.rmtree(chunks_dir, ignore_errors=True)
+
+    if not output_tif.exists() or output_tif.stat().st_size == 0:
+        raise RuntimeError(f"Direct tiled EE download produced an empty file: {output_tif}")
+    return output_tif
 
 
 @contextlib.contextmanager
