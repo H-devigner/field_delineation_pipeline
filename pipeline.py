@@ -1087,27 +1087,35 @@ class OpenSRRunner:
 
         start_time = time.time()
         window_size = parse_window_size(self.args.opensr_window_size)
-        with pushd(OPENSR_ROOT):
-            runner_kwargs = {
-                "root": str(input_tif),
-                "model": self.model,
-                "window_size": window_size,
-                "factor": self.args.opensr_factor,
-                "overlap": self.args.opensr_overlap,
-                "eliminate_border_px": self.args.opensr_eliminate_border_px,
-                "device": self.device,
-                "gpus": parse_gpus(self.args.gpus),
-            }
-            try:
-                sr_object = self.opensr_utils.large_file_processing(
-                    **runner_kwargs,
-                    batch_size=self.args.opensr_batch_size,
-                )
-            except TypeError as exc:
-                if "batch_size" not in str(exc):
-                    raise
-                LOGGER.warning("opensr-utils does not expose batch_size; running with its default dataloader batch size.")
-                sr_object = self.opensr_utils.large_file_processing(**runner_kwargs)
+        opensr_gpus = parse_gpus(self.args.gpus)
+        if isinstance(opensr_gpus, list):
+            LOGGER.warning(
+                "OpenSR multi-GPU launches Lightning child processes and is unsafe inside the orchestrator. "
+                "Using visible GPU %s for this tile. Run multiple tile-level pipeline jobs for multi-GPU throughput.",
+                opensr_gpus[0],
+            )
+            opensr_gpus = opensr_gpus[0]
+
+        runner_kwargs = {
+            "root": str(input_tif),
+            "model": self.model,
+            "window_size": window_size,
+            "factor": self.args.opensr_factor,
+            "overlap": self.args.opensr_overlap,
+            "eliminate_border_px": self.args.opensr_eliminate_border_px,
+            "device": self.device,
+            "gpus": opensr_gpus,
+        }
+        try:
+            sr_object = self.opensr_utils.large_file_processing(
+                **runner_kwargs,
+                batch_size=self.args.opensr_batch_size,
+            )
+        except TypeError as exc:
+            if "batch_size" not in str(exc):
+                raise
+            LOGGER.warning("opensr-utils does not expose batch_size; running with its default dataloader batch size.")
+            sr_object = self.opensr_utils.large_file_processing(**runner_kwargs)
 
         candidate = self._resolve_sr_output(sr_object, input_tif, output_sr.parent, start_time)
         if candidate.resolve() != output_sr.resolve():
