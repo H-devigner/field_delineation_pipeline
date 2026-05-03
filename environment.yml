@@ -1,9 +1,15 @@
 name: field-delineation
 channels:
+  - pytorch
+  - nvidia
   - conda-forge
   - defaults
 dependencies:
   - python=3.11
+  - pytorch
+  - torchvision
+  - torchaudio
+  - pytorch-cuda=12.4
   - gdal
   - geemap
   - geopandas
@@ -43,4 +49,4 @@ dependencies:
       - wandb>=0.17.0
       - diffusers>=0.30.0
       - taming-transformers>=0.0.1
-      - opensr_utils>=1.0.0
+      - opensr-utils>=1.0.0
