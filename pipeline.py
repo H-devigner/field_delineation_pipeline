@@ -565,6 +565,11 @@ def load_aoi(aoi_path: Path) -> Any:
     aoi_path = Path(aoi_path).expanduser().resolve()
     if not aoi_path.exists():
         raise FileNotFoundError(f"AOI not found: {aoi_path}")
+    if aoi_path.is_dir():
+        raise IsADirectoryError(
+            f"AOI path points to a directory, not a vector file: {aoi_path}. "
+            "Set --aoi to a GeoJSON/Shapefile/GPKG/WKT file."
+        )
 
     suffix = aoi_path.suffix.lower()
     if suffix in {".wkt", ".txt"}:
