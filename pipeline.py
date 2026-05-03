@@ -137,6 +137,14 @@ def parse_args() -> argparse.Namespace:
     da.add_argument("--stage-mode", default="copy", choices=["copy", "symlink"], help="How to stage SR/masks into Delineate-Anything/data.")
     da.add_argument("--python-executable", default=sys.executable, help="Python executable for Delineate-Anything CLI.")
     da.add_argument("--verbose-delineate", action="store_true")
+
+    exports = parser.add_argument_group("Exports")
+    exports.add_argument("--skip-exports", action="store_true", help="Skip GeoJSON/KML/PNG export step.")
+    exports.add_argument("--export-layer", default=None, help="Optional GPKG layer name. Defaults to first layer.")
+    exports.add_argument("--export-formats", default="geojson,kml,png", help="Comma-separated export formats.")
+    exports.add_argument("--export-assumed-epsg", default=None, type=int, help="Fallback EPSG if a GPKG has no CRS.")
+    exports.add_argument("--quicklook-dpi", default=220, type=int)
+    exports.add_argument("--quicklook-max-pixels", default=1800, type=int)
     return parser.parse_args()
 
 
@@ -408,6 +416,12 @@ def check_python_environment(args: argparse.Namespace) -> None:
                 "torch": "torch",
                 "tqdm": "tqdm",
                 "ultralytics": "ultralytics",
+            }
+        )
+    if not args.skip_exports:
+        requirements.update(
+            {
+                "matplotlib": "matplotlib",
             }
         )
 
@@ -1227,6 +1241,50 @@ def run_delineate(batch_config: Path, args: argparse.Namespace) -> None:
         raise RuntimeError(f"Delineate-Anything failed with exit code {return_code}.")
 
 
+def run_exports(
+    *,
+    run_dir: Path,
+    delineate_output_root: Path,
+    staged_manifest: dict[str, Any],
+    args: argparse.Namespace,
+) -> list[dict[str, Any]]:
+    from export_results import export_gpkg, write_gallery, write_summary_csv
+
+    export_root = run_dir / "07_exports"
+    export_root.mkdir(parents=True, exist_ok=True)
+    gpkg_paths = sorted(Path(delineate_output_root).glob("*.gpkg"))
+    if not gpkg_paths:
+        LOGGER.warning("No GPKG files found for export in %s", delineate_output_root)
+        return []
+
+    formats = {item.strip().lower() for item in args.export_formats.split(",") if item.strip()}
+    rows: list[dict[str, Any]] = []
+    for gpkg_path in gpkg_paths:
+        tile_id = gpkg_path.stem.replace(".simp", "")
+        raster_path = None
+        if tile_id in staged_manifest and staged_manifest[tile_id].get("sr"):
+            raster_path = Path(staged_manifest[tile_id]["sr"])
+
+        LOGGER.info("Exporting delineation result: %s", gpkg_path)
+        row = export_gpkg(
+            gpkg_path,
+            outdir=export_root / tile_id / gpkg_path.stem,
+            layer=args.export_layer,
+            assumed_epsg=args.export_assumed_epsg,
+            raster_path=raster_path,
+            formats=formats,
+            dpi=args.quicklook_dpi,
+            max_pixels=args.quicklook_max_pixels,
+        )
+        rows.append(row)
+
+    write_summary_csv(rows, export_root / "exports_summary.csv")
+    write_gallery(rows, export_root / "index.html")
+    dump_json(export_root / "exports_summary.json", {"exports": rows})
+    LOGGER.info("Exported %d GPKG file(s) to %s", len(rows), export_root)
+    return rows
+
+
 def stage_tile_for_delineation(
     *,
     tile_id: str,
@@ -1385,6 +1443,20 @@ def main() -> None:
     else:
         with timed_step(summary, run_dir, "delineation"):
             run_delineate(batch_config, args)
+
+    if args.skip_exports:
+        LOGGER.info("Skipping result exports.")
+    else:
+        with timed_step(summary, run_dir, "exports"):
+            export_rows = run_exports(
+                run_dir=run_dir,
+                delineate_output_root=delineate_output_root,
+                staged_manifest=staged_manifest,
+                args=args,
+            )
+            summary["exports"] = export_rows
+            summary["export_root"] = str(run_dir / "07_exports")
+            write_summary(run_dir, summary)
 
     summary["finished_at"] = dt.datetime.now(dt.timezone.utc).isoformat()
     write_summary(run_dir, summary)

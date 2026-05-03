@@ -21,6 +21,7 @@ dependencies:
   - scipy
   - pandas
   - numpy
+  - matplotlib
   - pyyaml
   - tqdm
   - psutil

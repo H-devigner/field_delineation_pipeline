@@ -187,6 +187,14 @@ field_delineation_pipeline/runs/<run_name>/
   05_delineate_configs/conf_pipeline.yaml
   05_delineate_configs/batch_pipeline.yaml
   06_delineated/<tile_id>.gpkg
+  07_exports/
+    exports_summary.csv
+    exports_summary.json
+    index.html
+    <tile_id>/<result_name>/*.geojson
+    <tile_id>/<result_name>/*.kml
+    <tile_id>/<result_name>/*.boundaries.png
+    <tile_id>/<result_name>/*.sr_overlay.png
   logs/pipeline.log
   manifests/intersecting_tiles.geojson
   manifests/intersecting_tiles.csv
@@ -220,6 +228,16 @@ Use `--stage-mode symlink` for large country runs if you want to avoid duplicati
 `stage_tile_for_delineation`: stages `sr.tif` and `<tile_id>.tif` masks into `Delineate-Anything/data`.
 
 `write_delineate_configs` and `run_delineate`: generate the batch/config YAML files and execute `delineate.py`.
+
+`export_results`: converts final GeoPackages into WGS84 GeoJSON/KML, boundary quicklook PNGs, optional SR-overlay PNGs, summary CSV/JSON, and an `index.html` gallery.
+
+Standalone export command:
+
+```bash
+python export_results.py runs/small_aoi_test/06_delineated \
+  --outdir runs/small_aoi_test/07_exports_manual \
+  --formats geojson,kml,png
+```
 
 ## GPU Use
 
