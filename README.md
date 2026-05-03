@@ -53,23 +53,66 @@ git clone https://github.com/Lavreniuk/Delineate-Anything.git
 
 Run the pipeline from one shared conda environment. The orchestrator imports S2Mosaic, Earth Engine/geemap, OpenSR, and Delineate-Anything code, so separate per-repo environments will fail when a later step imports a package that is missing from the active environment.
 
-Create the base environment with GDAL/geospatial packages:
+On corporate networks, prefer the two-step setup. Conda installs only GDAL/geospatial packages, then pip installs the Python/ML stack through the proxy.
+
+Set proxy variables:
+
+```bash
+export HTTP_PROXY=http://10.68.69.53:80/
+export HTTPS_PROXY=http://10.68.69.53:80/
+export PIP_PROXY=http://10.68.69.53:80/
+export PIP_INDEX_URL=https://pypi.org/simple
+export PIP_TRUSTED_HOST="pypi.org files.pythonhosted.org"
+export CONDA_NO_PLUGINS=true
+```
+
+Create the conda base:
+
+```bash
+conda env create -f environment-conda.yml -n field-delineation --solver=libmamba
+conda activate field-delineation
+```
+
+Install the pip dependencies through the proxy:
+
+```bash
+python -m pip install -r requirements-pipeline.txt \
+  --index-url https://pypi.org/simple \
+  --trusted-host pypi.org \
+  --trusted-host files.pythonhosted.org \
+  --proxy http://10.68.69.53:80/
+```
+
+If `--solver=libmamba` is unavailable, omit it:
+
+```bash
+conda env create -f environment-conda.yml -n field-delineation
+```
+
+The older all-in-one environment file is still available:
 
 ```bash
 conda env create -f field_delineation_pipeline/environment.yml
 conda activate field-delineation
 ```
 
-Install GPU PyTorch for the H100 machine, then verify CUDA:
+Verify CUDA and core packages:
 
 ```bash
-python -m pip install --index-url https://download.pytorch.org/whl/cu124 torch torchvision torchaudio
 python - <<'PY'
+from osgeo import gdal
+import geemap
+import ee
 import torch
-print(torch.__version__)
-print(torch.cuda.is_available())
-print(torch.cuda.device_count())
+import opensr_utils
+import omegaconf
+print("GDAL:", gdal.VersionInfo())
+print("geemap:", geemap.__version__)
+print("torch:", torch.__version__)
+print("cuda:", torch.cuda.is_available(), torch.cuda.device_count())
 print(torch.cuda.get_device_name(0) if torch.cuda.is_available() else "no cuda")
+print("opensr_utils ok")
+print("omegaconf ok")
 PY
 ```
 

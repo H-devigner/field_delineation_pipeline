@@ -1,0 +1,21 @@
+name: field-delineation
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.11
+  - gdal
+  - geemap
+  - geopandas
+  - rasterio
+  - shapely
+  - pyproj
+  - fiona
+  - rtree
+  - scipy
+  - pandas
+  - numpy
+  - pyyaml
+  - tqdm
+  - psutil
+  - pip
