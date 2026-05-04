@@ -145,6 +145,12 @@ def parse_args() -> argparse.Namespace:
     lclu.add_argument("--lclu-backend", default="direct", choices=["direct", "geemap"], help="LCLU download backend.")
     lclu.add_argument("--lclu-direct-tile-degrees", default=0.15, type=float, help="Chunk size in degrees for direct EE LCLU downloads.")
     lclu.add_argument("--lclu-request-timeout", default=300, type=int, help="HTTP timeout in seconds for direct EE LCLU downloads.")
+    lclu.add_argument("--lclu-retries", default=5, type=int, help="Retry count for direct EE LCLU chunk downloads.")
+    lclu.add_argument("--lclu-retry-sleep-seconds", default=10.0, type=float, help="Delay between direct EE LCLU retries.")
+    lclu.add_argument("--lclu-proxy", default=None, help="Explicit HTTP/HTTPS proxy URL for direct EE LCLU downloads.")
+    lclu.add_argument("--lclu-no-proxy", action="store_true", help="Ignore HTTP_PROXY/HTTPS_PROXY for direct EE LCLU downloads.")
+    lclu.add_argument("--lclu-ca-bundle", default=None, type=Path, help="Optional PEM CA bundle for direct EE LCLU downloads.")
+    lclu.add_argument("--lclu-no-verify-ssl", action="store_true", help="Disable SSL verification for direct EE LCLU downloads. Use only on trusted networks.")
     lclu.add_argument("--lclu-num-threads", default=1, type=int, help="Threads for geemap/geedim LCLU download.")
     lclu.add_argument("--lclu-max-tile-size", default=16, type=int, help="Max geedim tile size in MB.")
     lclu.add_argument("--lclu-max-tile-dim", default=1024, type=int, help="Max geedim tile width/height in pixels.")
@@ -1010,6 +1016,11 @@ def download_dynamic_world_mask(
             crs=args.lclu_crs,
             tile_degrees=args.lclu_direct_tile_degrees,
             timeout=args.lclu_request_timeout,
+            retries=args.lclu_retries,
+            retry_sleep_seconds=args.lclu_retry_sleep_seconds,
+            verify_ssl=resolve_requests_verify(args.lclu_no_verify_ssl, args.lclu_ca_bundle),
+            proxy=args.lclu_proxy,
+            no_proxy=args.lclu_no_proxy,
         )
     else:
         geemap.download_ee_image(
@@ -1043,15 +1054,95 @@ def copy_or_symlink(src: Path, dst: Path, mode: str, overwrite: bool) -> Path:
     return dst
 
 
-def download_url_to_file(url: str, output_path: Path, timeout: int) -> None:
+def resolve_requests_verify(no_verify_ssl: bool = False, ca_bundle: Path | None = None) -> bool | str:
+    if no_verify_ssl:
+        return False
+    if ca_bundle is None:
+        return True
+    ca_bundle = Path(ca_bundle).expanduser().resolve()
+    if not ca_bundle.exists():
+        raise FileNotFoundError(f"CA bundle not found: {ca_bundle}")
+    return str(ca_bundle)
+
+
+def configure_requests_session(
+    *,
+    user_agent: str,
+    proxy: str | None = None,
+    no_proxy: bool = False,
+    verify_ssl: bool | str = True,
+) -> Any:
     import requests
 
-    with requests.get(url, stream=True, timeout=timeout) as response:
-        response.raise_for_status()
-        with output_path.open("wb") as handle:
-            for chunk in response.iter_content(chunk_size=1024 * 1024):
-                if chunk:
-                    handle.write(chunk)
+    session = requests.Session()
+    session.trust_env = not no_proxy
+    session.headers.update({"User-Agent": user_agent})
+    if proxy:
+        session.proxies.update({"http": proxy, "https": proxy})
+    if no_proxy:
+        LOGGER.info("Ignoring proxy environment variables for HTTP downloads.")
+    if verify_ssl is False:
+        try:
+            import urllib3
+            from urllib3.exceptions import InsecureRequestWarning
+
+            urllib3.disable_warnings(InsecureRequestWarning)
+        except Exception:
+            pass
+        LOGGER.warning("SSL certificate verification is disabled for HTTP downloads.")
+    return session
+
+
+def download_url_to_file(
+    url: str,
+    output_path: Path,
+    timeout: int,
+    *,
+    retries: int,
+    retry_sleep_seconds: float,
+    verify_ssl: bool | str,
+    proxy: str | None,
+    no_proxy: bool,
+    user_agent: str = "field-delineation-pipeline/1.0",
+) -> None:
+    if retries < 0:
+        raise ValueError("--lclu-retries must be zero or positive.")
+
+    session = configure_requests_session(
+        user_agent=user_agent,
+        proxy=proxy,
+        no_proxy=no_proxy,
+        verify_ssl=verify_ssl,
+    )
+
+    for attempt in range(retries + 1):
+        output_path.unlink(missing_ok=True)
+        try:
+            with session.get(url, stream=True, timeout=timeout, verify=verify_ssl) as response:
+                response.raise_for_status()
+                with output_path.open("wb") as handle:
+                    for chunk in response.iter_content(chunk_size=1024 * 1024):
+                        if chunk:
+                            handle.write(chunk)
+            if output_path.exists() and output_path.stat().st_size > 0:
+                return
+            raise RuntimeError(f"HTTP download produced an empty file: {output_path}")
+        except Exception as exc:
+            output_path.unlink(missing_ok=True)
+            if attempt >= retries:
+                raise RuntimeError(
+                    f"Failed HTTP download after {retries + 1} attempt(s): {url}. "
+                    "For proxy issues, try --lclu-proxy, --lclu-no-proxy, --lclu-ca-bundle, or --lclu-no-verify-ssl."
+                ) from exc
+            LOGGER.warning(
+                "HTTP download failed, retrying in %.1fs (%d/%d): %s",
+                retry_sleep_seconds,
+                attempt + 1,
+                retries,
+                exc,
+            )
+            if retry_sleep_seconds > 0:
+                time.sleep(retry_sleep_seconds)
 
 
 def extract_tif_if_zip(download_path: Path, output_tif: Path) -> Path:
@@ -1078,6 +1169,11 @@ def download_ee_image_direct(
     scale: int,
     crs: str,
     timeout: int,
+    retries: int,
+    retry_sleep_seconds: float,
+    verify_ssl: bool | str,
+    proxy: str | None,
+    no_proxy: bool,
 ) -> Path:
     download_path = output_tif.with_suffix(".download")
     download_path.unlink(missing_ok=True)
@@ -1089,7 +1185,16 @@ def download_ee_image_direct(
             "format": "GEO_TIFF",
         }
     )
-    download_url_to_file(url, download_path, timeout)
+    download_url_to_file(
+        url,
+        download_path,
+        timeout,
+        retries=retries,
+        retry_sleep_seconds=retry_sleep_seconds,
+        verify_ssl=verify_ssl,
+        proxy=proxy,
+        no_proxy=no_proxy,
+    )
     extract_tif_if_zip(download_path, output_tif)
     if not output_tif.exists() or output_tif.stat().st_size == 0:
         raise RuntimeError(f"Direct EE download produced an empty file: {output_tif}")
@@ -1105,6 +1210,11 @@ def download_ee_image_direct_tiled(
     crs: str,
     tile_degrees: float,
     timeout: int,
+    retries: int,
+    retry_sleep_seconds: float,
+    verify_ssl: bool | str,
+    proxy: str | None,
+    no_proxy: bool,
 ) -> Path:
     import ee
     import rasterio
@@ -1155,6 +1265,11 @@ def download_ee_image_direct_tiled(
                 scale=scale,
                 crs=crs,
                 timeout=timeout,
+                retries=retries,
+                retry_sleep_seconds=retry_sleep_seconds,
+                verify_ssl=verify_ssl,
+                proxy=proxy,
+                no_proxy=no_proxy,
             )
             chunk_paths.append(chunk_tif)
 

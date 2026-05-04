@@ -391,6 +391,18 @@ Default delineation mask settings are:
 
 That means crop class `4` is the only class not filtered. Adjust these if you switch from Dynamic World to another LCLU source.
 
+For unstable corporate proxy connections to Earth Engine signed download URLs, keep the direct backend but add retries and explicit proxy settings:
+
+```bash
+--lclu-backend direct \
+--lclu-retries 8 \
+--lclu-retry-sleep-seconds 20 \
+--lclu-request-timeout 600 \
+--lclu-proxy http://10.68.69.53:80/
+```
+
+If the proxy itself is the failure point and direct internet is allowed, replace `--lclu-proxy ...` with `--lclu-no-proxy`. If TLS is intercepted, prefer `--lclu-ca-bundle /path/to/corp-ca.pem`; use `--lclu-no-verify-ssl` only for trusted-network smoke tests.
+
 ## Helper Scripts
 
 The old prototype scripts are now reusable CLI helpers:
