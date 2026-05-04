@@ -237,6 +237,17 @@ python basemap_tiles.py download \
 
 If a corporate proxy intercepts HTTPS and the machine does not have the corporate CA installed, prefer passing a PEM file with `--ca-bundle /path/to/corp-ca.pem`. For a quick trusted-network smoke test only, use `--no-verify-ssl`. If the proxy returns `502 cannotconnect`, try `--no-proxy`; if direct internet is blocked, use `--proxy http://host:port/` and ask IT to allowlist the tile host.
 
+Probe one tile before starting a larger download:
+
+```bash
+python basemap_tiles.py probe \
+  --provider openaerialmap \
+  --aoi runs/basemap_download/tiny_aoi_250m.geojson \
+  --zoom 18 \
+  --no-verify-ssl \
+  --no-proxy
+```
+
 Run the full orchestrator by letting it download OpenAerialMap tiles first:
 
 ```bash

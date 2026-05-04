@@ -58,6 +58,10 @@ def xyz_provider_attribution(provider: str | None) -> str | None:
     return XYZ_PROVIDER_SPECS.get(provider, {}).get("attribution")
 
 
+def format_xyz_url(url_template: str, zoom: int, x: int, y: int) -> str:
+    return url_template.format(z=zoom, zoom=zoom, x=x, y=y)
+
+
 def lonlat_to_xyz(lon: float, lat: float, zoom: int) -> tuple[int, int]:
     """Return the XYZ tile index containing a longitude/latitude coordinate."""
 
@@ -363,6 +367,83 @@ def resolve_requests_verify(no_verify_ssl: bool = False, ca_bundle: Path | None 
     return str(ca_bundle)
 
 
+def configure_requests_session(
+    *,
+    user_agent: str,
+    proxy: str | None = None,
+    no_proxy: bool = False,
+    verify_ssl: bool | str = True,
+) -> Any:
+    import requests
+
+    session = requests.Session()
+    session.trust_env = not no_proxy
+    session.headers.update({"User-Agent": user_agent})
+    if proxy:
+        session.proxies.update({"http": proxy, "https": proxy})
+    if no_proxy:
+        LOGGER.info("Ignoring proxy environment variables for XYZ tile requests.")
+    if verify_ssl is False:
+        try:
+            import urllib3
+            from urllib3.exceptions import InsecureRequestWarning
+
+            urllib3.disable_warnings(InsecureRequestWarning)
+        except Exception:
+            pass
+        LOGGER.warning("SSL certificate verification is disabled for XYZ tile requests.")
+    return session
+
+
+def choose_probe_tile(
+    *,
+    bounds_wgs84: tuple[float, float, float, float],
+    zoom: int,
+) -> tuple[int, int]:
+    x_range, y_range = xyz_range_for_bounds(bounds_wgs84, zoom)
+    xs = list(x_range)
+    ys = list(y_range)
+    return xs[len(xs) // 2], ys[len(ys) // 2]
+
+
+def probe_xyz_tile(
+    *,
+    url_template: str,
+    zoom: int,
+    x: int,
+    y: int,
+    timeout: int,
+    user_agent: str,
+    verify_ssl: bool | str,
+    proxy: str | None = None,
+    no_proxy: bool = False,
+) -> dict[str, Any]:
+    url = format_xyz_url(url_template, zoom, x, y)
+    session = configure_requests_session(
+        user_agent=user_agent,
+        proxy=proxy,
+        no_proxy=no_proxy,
+        verify_ssl=verify_ssl,
+    )
+    result: dict[str, Any] = {"url": url, "z": zoom, "x": x, "y": y}
+    try:
+        with session.get(url, stream=True, timeout=timeout, verify=verify_ssl) as response:
+            result.update(
+                {
+                    "status_code": response.status_code,
+                    "reason": response.reason,
+                    "content_type": response.headers.get("content-type"),
+                    "content_length": response.headers.get("content-length"),
+                }
+            )
+            first_chunk = next(response.iter_content(chunk_size=64), b"")
+            result["first_bytes_hex"] = first_chunk[:32].hex()
+            result["ok"] = bool(response.ok)
+    except Exception as exc:
+        result.update({"ok": False, "error": str(exc), "error_type": type(exc).__name__})
+    return result
+
+
 def download_xyz_tiles(
     *,
     url_template: str,
@@ -385,8 +466,6 @@ def download_xyz_tiles(
 ) -> list[Path]:
     """Download XYZ tiles for WGS84 bounds from a URL template."""
 
-    import requests
-
     x_range, y_range = xyz_range_for_bounds(bounds_wgs84, zoom)
     planned = [(x, y) for x in x_range for y in y_range]
     if max_tiles is not None and len(planned) > max_tiles:
@@ -398,22 +477,12 @@ def download_xyz_tiles(
     output_root = Path(output_root).expanduser().resolve()
     output_root.mkdir(parents=True, exist_ok=True)
     extension = extension.lstrip(".")
-    session = requests.Session()
-    session.trust_env = not no_proxy
-    session.headers.update({"User-Agent": user_agent})
-    if proxy:
-        session.proxies.update({"http": proxy, "https": proxy})
-    if no_proxy:
-        LOGGER.info("Ignoring proxy environment variables for XYZ tile downloads.")
-    if verify_ssl is False:
-        try:
-            import urllib3
-            from urllib3.exceptions import InsecureRequestWarning
-
-            urllib3.disable_warnings(InsecureRequestWarning)
-        except Exception:
-            pass
-        LOGGER.warning("SSL certificate verification is disabled for XYZ tile downloads.")
+    session = configure_requests_session(
+        user_agent=user_agent,
+        proxy=proxy,
+        no_proxy=no_proxy,
+        verify_ssl=verify_ssl,
+    )
 
     if retries < 0:
         raise ValueError("--retries must be zero or positive.")
@@ -421,7 +490,7 @@ def download_xyz_tiles(
     downloaded: list[Path] = []
     manifest_rows: list[dict[str, Any]] = []
     for index, (x, y) in enumerate(planned, start=1):
-        url = url_template.format(z=zoom, x=x, y=y)
+        url = format_xyz_url(url_template, zoom, x, y)
         output_path = output_root / str(zoom) / str(x) / f"{y}.{extension}"
         output_path.parent.mkdir(parents=True, exist_ok=True)
         if output_path.exists() and output_path.stat().st_size > 0 and not overwrite:
@@ -556,6 +625,20 @@ def build_parser() -> argparse.ArgumentParser:
     tiny_aoi.add_argument("--output", required=True, type=Path)
     tiny_aoi.add_argument("--size-meters", default=500.0, type=float, help="Square side length in meters.")
 
+    probe = subparsers.add_parser("probe", help="Test one XYZ tile URL without downloading the full AOI.")
+    probe.add_argument("--provider", default=None, choices=sorted(XYZ_PROVIDER_SPECS), help="Built-in free/open imagery provider preset.")
+    probe.add_argument("--url-template", default=None, help="Example: https://server/{z}/{x}/{y}.png")
+    probe.add_argument("--aoi", default=None, type=Path, help="AOI used to choose a center probe tile if --x/--y are omitted.")
+    probe.add_argument("--zoom", required=True, type=int)
+    probe.add_argument("--x", default=None, type=int)
+    probe.add_argument("--y", default=None, type=int)
+    probe.add_argument("--timeout", default=30, type=int)
+    probe.add_argument("--user-agent", default="field-delineation-pipeline/1.0")
+    probe.add_argument("--ca-bundle", default=None, type=Path, help="Optional PEM CA bundle for corporate TLS interception.")
+    probe.add_argument("--no-verify-ssl", action="store_true", help="Disable SSL verification for this probe. Use only on trusted networks.")
+    probe.add_argument("--proxy", default=None, help="Explicit HTTP/HTTPS proxy URL for this probe.")
+    probe.add_argument("--no-proxy", action="store_true", help="Ignore HTTP_PROXY/HTTPS_PROXY environment variables.")
+
     providers = subparsers.add_parser("providers", help="List built-in XYZ provider presets.")
     providers.set_defaults(command="providers")
     return parser
@@ -591,6 +674,33 @@ def main(argv: Iterable[str] | None = None) -> None:
         )
         print(output)
         return
+
+    if args.command == "probe":
+        url_template = resolve_xyz_url_template(args.provider, args.url_template)
+        if url_template is None:
+            raise ValueError("Probe mode requires either --provider or --url-template.")
+        if (args.x is None) != (args.y is None):
+            raise ValueError("Pass both --x and --y, or neither.")
+        if args.x is None or args.y is None:
+            if args.aoi is None:
+                raise ValueError("Probe mode requires --aoi when --x/--y are omitted.")
+            bounds = load_aoi_bounds_wgs84(args.aoi)
+            x, y = choose_probe_tile(bounds_wgs84=bounds, zoom=args.zoom)
+        else:
+            x, y = args.x, args.y
+        result = probe_xyz_tile(
+            url_template=url_template,
+            zoom=args.zoom,
+            x=x,
+            y=y,
+            timeout=args.timeout,
+            user_agent=args.user_agent,
+            verify_ssl=resolve_requests_verify(args.no_verify_ssl, args.ca_bundle),
+            proxy=args.proxy,
+            no_proxy=args.no_proxy,
+        )
+        print(json.dumps(result, indent=2))
+        raise SystemExit(0 if result.get("ok") else 2)
 
     bounds = load_aoi_bounds_wgs84(args.aoi)
     url_template = resolve_xyz_url_template(args.provider, args.url_template)
