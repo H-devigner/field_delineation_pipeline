@@ -20,8 +20,15 @@ WEB_MERCATOR_RADIUS = 6378137.0
 WEB_MERCATOR_ORIGIN_SHIFT = math.pi * WEB_MERCATOR_RADIUS
 SUPPORTED_TILE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp", ".tif", ".tiff"}
 XYZ_PROVIDER_SPECS: dict[str, dict[str, str]] = {
+    "eox_s2cloudless_2024": {
+        "url_template": "https://tiles.maps.eox.at/wmts/1.0.0/s2cloudless-2024_3857/default/g/{z}/{y}/{x}.jpg",
+        "extension": "jpg",
+        "attribution": "Sentinel-2 cloudless 2024 by EOX IT Services GmbH using modified Copernicus Sentinel data.",
+        "notes": "Global Sentinel-2 cloudless fallback. It is 10m satellite imagery, not high-resolution aerial imagery.",
+    },
     "openaerialmap": {
         "url_template": "https://apps.kontur.io/raster-tiler/oam/mosaic/{z}/{x}/{y}.png",
+        "extension": "png",
         "attribution": "OpenAerialMap / Open Imagery Network contributors; mosaic tiles by Kontur.",
         "notes": "Open imagery coverage varies by AOI. Use small AOIs and keep attribution with derived outputs.",
     },
@@ -56,6 +63,12 @@ def xyz_provider_attribution(provider: str | None) -> str | None:
     if provider is None:
         return None
     return XYZ_PROVIDER_SPECS.get(provider, {}).get("attribution")
+
+
+def xyz_provider_extension(provider: str | None, fallback: str = "png") -> str:
+    if provider is None:
+        return fallback
+    return XYZ_PROVIDER_SPECS.get(provider, {}).get("extension", fallback)
 
 
 def format_xyz_url(url_template: str, zoom: int, x: int, y: int) -> str:
@@ -451,7 +464,7 @@ def download_xyz_tiles(
     bounds_wgs84: tuple[float, float, float, float],
     zoom: int,
     provider: str | None = None,
-    extension: str = "png",
+    extension: str | None = None,
     timeout: int = 60,
     sleep_seconds: float = 0.0,
     overwrite: bool = False,
@@ -476,7 +489,7 @@ def download_xyz_tiles(
 
     output_root = Path(output_root).expanduser().resolve()
     output_root.mkdir(parents=True, exist_ok=True)
-    extension = extension.lstrip(".")
+    extension = (extension or xyz_provider_extension(provider)).lstrip(".")
     session = configure_requests_session(
         user_agent=user_agent,
         proxy=proxy,
@@ -605,7 +618,7 @@ def build_parser() -> argparse.ArgumentParser:
     download.add_argument("--aoi", required=True, type=Path)
     download.add_argument("--zoom", required=True, type=int)
     download.add_argument("--output-root", required=True, type=Path)
-    download.add_argument("--extension", default="png")
+    download.add_argument("--extension", default=None, help="Downloaded tile file extension. Defaults to the provider extension.")
     download.add_argument("--timeout", default=60, type=int)
     download.add_argument("--sleep-seconds", default=0.0, type=float)
     download.add_argument("--overwrite", action="store_true")

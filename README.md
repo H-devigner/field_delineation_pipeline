@@ -211,7 +211,7 @@ python pipeline.py \
   --resume
 ```
 
-Download OpenAerialMap tiles for an AOI and convert them. Coverage depends on whether OpenAerialMap has open imagery for the area.
+Download OpenAerialMap tiles for an AOI and convert them. Coverage depends on whether OpenAerialMap has open imagery for the area. If the network blocks `apps.kontur.io`, use `eox_s2cloudless_2024` as a global Sentinel-2 cloudless fallback. EOX is not high-resolution aerial imagery, but it is useful for testing the basemap pipeline through a different host.
 
 Create a very small centered AOI first for smoke tests:
 
@@ -246,6 +246,17 @@ python basemap_tiles.py probe \
   --zoom 18 \
   --no-verify-ssl \
   --no-proxy
+```
+
+Probe the EOX fallback host:
+
+```bash
+python basemap_tiles.py probe \
+  --provider eox_s2cloudless_2024 \
+  --aoi runs/basemap_download/tiny_aoi_250m.geojson \
+  --zoom 16 \
+  --no-verify-ssl \
+  --proxy http://10.68.69.53:80/
 ```
 
 Run the full orchestrator by letting it download OpenAerialMap tiles first:
