@@ -218,22 +218,24 @@ Create a very small centered AOI first for smoke tests:
 ```bash
 python basemap_tiles.py tiny-aoi \
   --aoi /path/to/aoi.geojson \
-  --size-meters 500 \
-  --output runs/basemap_download/tiny_aoi_500m.geojson
+  --size-meters 250 \
+  --output runs/basemap_download/tiny_aoi_250m.geojson
 ```
 
 ```bash
 python basemap_tiles.py download \
   --provider openaerialmap \
-  --aoi runs/basemap_download/tiny_aoi_500m.geojson \
+  --aoi runs/basemap_download/tiny_aoi_250m.geojson \
   --zoom 18 \
   --output-root runs/basemap_download/tiles \
   --max-tiles 2000 \
   --sleep-seconds 0.05 \
+  --no-verify-ssl \
+  --no-proxy \
   --convert-output runs/basemap_download/basemap_3857.tif
 ```
 
-If a corporate proxy intercepts HTTPS and the machine does not have the corporate CA installed, prefer passing a PEM file with `--ca-bundle /path/to/corp-ca.pem`. For a quick trusted-network smoke test only, use `--no-verify-ssl`.
+If a corporate proxy intercepts HTTPS and the machine does not have the corporate CA installed, prefer passing a PEM file with `--ca-bundle /path/to/corp-ca.pem`. For a quick trusted-network smoke test only, use `--no-verify-ssl`. If the proxy returns `502 cannotconnect`, try `--no-proxy`; if direct internet is blocked, use `--proxy http://host:port/` and ask IT to allowlist the tile host.
 
 Run the full orchestrator by letting it download OpenAerialMap tiles first:
 
@@ -250,6 +252,7 @@ python pipeline.py \
   --xyz-max-download-tiles 2000 \
   --xyz-sleep-seconds 0.05 \
   --xyz-no-verify-ssl \
+  --xyz-no-proxy \
   --ee-project agriculture-486211 \
   --resume
 ```

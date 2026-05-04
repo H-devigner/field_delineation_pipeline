@@ -377,6 +377,11 @@ def download_xyz_tiles(
     user_agent: str = "field-delineation-pipeline/1.0",
     max_tiles: int | None = None,
     verify_ssl: bool | str = True,
+    proxy: str | None = None,
+    no_proxy: bool = False,
+    retries: int = 2,
+    retry_sleep_seconds: float = 2.0,
+    skip_failed: bool = False,
 ) -> list[Path]:
     """Download XYZ tiles for WGS84 bounds from a URL template."""
 
@@ -394,7 +399,12 @@ def download_xyz_tiles(
     output_root.mkdir(parents=True, exist_ok=True)
     extension = extension.lstrip(".")
     session = requests.Session()
+    session.trust_env = not no_proxy
     session.headers.update({"User-Agent": user_agent})
+    if proxy:
+        session.proxies.update({"http": proxy, "https": proxy})
+    if no_proxy:
+        LOGGER.info("Ignoring proxy environment variables for XYZ tile downloads.")
     if verify_ssl is False:
         try:
             import urllib3
@@ -405,29 +415,80 @@ def download_xyz_tiles(
             pass
         LOGGER.warning("SSL certificate verification is disabled for XYZ tile downloads.")
 
+    if retries < 0:
+        raise ValueError("--retries must be zero or positive.")
+
     downloaded: list[Path] = []
     manifest_rows: list[dict[str, Any]] = []
     for index, (x, y) in enumerate(planned, start=1):
         url = url_template.format(z=zoom, x=x, y=y)
         output_path = output_root / str(zoom) / str(x) / f"{y}.{extension}"
         output_path.parent.mkdir(parents=True, exist_ok=True)
-        if output_path.exists() and not overwrite:
+        if output_path.exists() and output_path.stat().st_size > 0 and not overwrite:
             LOGGER.info("Reusing XYZ tile %d/%d: %s", index, len(planned), output_path)
             downloaded.append(output_path)
             manifest_rows.append({"z": zoom, "x": x, "y": y, "path": str(output_path), "url": url, "status": "reused"})
             continue
+        if output_path.exists() and output_path.stat().st_size == 0:
+            LOGGER.warning("Removing empty XYZ tile before retrying: %s", output_path)
+            output_path.unlink()
 
         LOGGER.info("Downloading XYZ tile %d/%d: z=%d x=%d y=%d", index, len(planned), zoom, x, y)
-        with session.get(url, stream=True, timeout=timeout, verify=verify_ssl) as response:
-            response.raise_for_status()
-            with output_path.open("wb") as handle:
-                for chunk in response.iter_content(chunk_size=1024 * 256):
-                    if chunk:
-                        handle.write(chunk)
+        try:
+            for attempt in range(retries + 1):
+                try:
+                    with session.get(url, stream=True, timeout=timeout, verify=verify_ssl) as response:
+                        response.raise_for_status()
+                        with output_path.open("wb") as handle:
+                            for chunk in response.iter_content(chunk_size=1024 * 256):
+                                if chunk:
+                                    handle.write(chunk)
+                    break
+                except Exception:
+                    if output_path.exists() and output_path.stat().st_size == 0:
+                        output_path.unlink()
+                    if attempt >= retries:
+                        raise
+                    LOGGER.warning(
+                        "XYZ tile failed, retrying in %.1fs (%d/%d): z=%d x=%d y=%d",
+                        retry_sleep_seconds,
+                        attempt + 1,
+                        retries,
+                        zoom,
+                        x,
+                        y,
+                    )
+                    if retry_sleep_seconds > 0:
+                        time.sleep(retry_sleep_seconds)
+        except Exception as exc:
+            manifest_rows.append(
+                {
+                    "z": zoom,
+                    "x": x,
+                    "y": y,
+                    "path": str(output_path),
+                    "url": url,
+                    "status": "failed",
+                    "error": str(exc),
+                }
+            )
+            if skip_failed:
+                LOGGER.error("Skipping failed XYZ tile z=%d x=%d y=%d: %s", zoom, x, y, exc)
+                continue
+            raise RuntimeError(
+                f"Failed to download XYZ tile z={zoom} x={x} y={y} from {url}: {exc}. "
+                "If this is a corporate network/proxy issue, try --no-proxy, --proxy, or --ca-bundle."
+            ) from exc
+
+        if not output_path.exists() or output_path.stat().st_size == 0:
+            raise RuntimeError(f"XYZ download produced an empty file: {output_path}")
         downloaded.append(output_path)
         manifest_rows.append({"z": zoom, "x": x, "y": y, "path": str(output_path), "url": url, "status": "downloaded"})
         if sleep_seconds > 0 and index < len(planned):
             time.sleep(sleep_seconds)
+
+    if not downloaded:
+        raise RuntimeError("No XYZ tiles were downloaded or reused.")
 
     with (output_root / "download_manifest.csv").open("w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=["z", "x", "y", "path", "url", "status"])
@@ -440,6 +501,8 @@ def download_xyz_tiles(
                 "attribution": xyz_provider_attribution(provider),
                 "url_template": url_template,
                 "verify_ssl": verify_ssl,
+                "proxy": proxy,
+                "no_proxy": no_proxy,
                 "tiles": manifest_rows,
             },
             handle,
@@ -481,6 +544,11 @@ def build_parser() -> argparse.ArgumentParser:
     download.add_argument("--max-tiles", default=5000, type=int)
     download.add_argument("--ca-bundle", default=None, type=Path, help="Optional PEM CA bundle for corporate TLS interception.")
     download.add_argument("--no-verify-ssl", action="store_true", help="Disable SSL verification for tile downloads. Use only on trusted networks.")
+    download.add_argument("--proxy", default=None, help="Explicit HTTP/HTTPS proxy URL for tile downloads.")
+    download.add_argument("--no-proxy", action="store_true", help="Ignore HTTP_PROXY/HTTPS_PROXY environment variables.")
+    download.add_argument("--retries", default=2, type=int)
+    download.add_argument("--retry-sleep-seconds", default=2.0, type=float)
+    download.add_argument("--skip-failed", action="store_true", help="Keep going when individual tiles fail; missing pixels remain blank after conversion.")
     download.add_argument("--convert-output", default=None, type=Path, help="Optional GeoTIFF to create after download.")
 
     tiny_aoi = subparsers.add_parser("tiny-aoi", help="Create a small centered square AOI for basemap smoke tests.")
@@ -541,6 +609,11 @@ def main(argv: Iterable[str] | None = None) -> None:
         user_agent=args.user_agent,
         max_tiles=args.max_tiles,
         verify_ssl=resolve_requests_verify(args.no_verify_ssl, args.ca_bundle),
+        proxy=args.proxy,
+        no_proxy=args.no_proxy,
+        retries=args.retries,
+        retry_sleep_seconds=args.retry_sleep_seconds,
+        skip_failed=args.skip_failed,
     )
     if args.convert_output:
         convert_xyz_tiles_to_geotiff(

@@ -99,6 +99,11 @@ def parse_args() -> argparse.Namespace:
     basemap.add_argument("--xyz-user-agent", default="field-delineation-pipeline/1.0", help="User-Agent for basemap tile requests.")
     basemap.add_argument("--xyz-ca-bundle", default=None, type=Path, help="Optional PEM CA bundle for corporate TLS interception.")
     basemap.add_argument("--xyz-no-verify-ssl", action="store_true", help="Disable SSL verification for tile downloads. Use only on trusted networks.")
+    basemap.add_argument("--xyz-proxy", default=None, help="Explicit HTTP/HTTPS proxy URL for basemap tile downloads.")
+    basemap.add_argument("--xyz-no-proxy", action="store_true", help="Ignore HTTP_PROXY/HTTPS_PROXY environment variables for basemap tile downloads.")
+    basemap.add_argument("--xyz-retries", default=2, type=int)
+    basemap.add_argument("--xyz-retry-sleep-seconds", default=2.0, type=float)
+    basemap.add_argument("--xyz-skip-failed", action="store_true", help="Continue when individual basemap tiles fail; missing pixels remain blank.")
     basemap.add_argument(
         "--xyz-max-download-tiles",
         default=5000,
@@ -866,6 +871,11 @@ def prepare_basemap_geotiff(
             user_agent=args.xyz_user_agent,
             max_tiles=args.xyz_max_download_tiles,
             verify_ssl=resolve_requests_verify(args.xyz_no_verify_ssl, args.xyz_ca_bundle),
+            proxy=args.xyz_proxy,
+            no_proxy=args.xyz_no_proxy,
+            retries=args.xyz_retries,
+            retry_sleep_seconds=args.xyz_retry_sleep_seconds,
+            skip_failed=args.xyz_skip_failed,
         )
 
     if tiles_root is None:
