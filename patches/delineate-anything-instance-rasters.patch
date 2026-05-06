@@ -1,0 +1,206 @@
+From 851f8f5989ae008f972b2137575bc4a5e77de950 Mon Sep 17 00:00:00 2001
+From: lahoucine digrari <digrari756@gmai.com>
+Date: Wed, 6 May 2026 12:03:47 +0100
+Subject: [PATCH] Save postprocessed instance rasters
+
+---
+ conf_sample.yaml                |  9 +++++-
+ methods/main/PostprocHandler.py | 54 ++++++++++++++++++++++++-------
+ methods/main/inference.py       | 56 ++++++++++++++++++++++++++-------
+ 3 files changed, 96 insertions(+), 23 deletions(-)
+
+diff --git a/conf_sample.yaml b/conf_sample.yaml
+index 3d73795..38ffe21 100644
+--- a/conf_sample.yaml
++++ b/conf_sample.yaml
+@@ -72,6 +72,13 @@ polygonization_args:
+   layer_name: fields
+   override_if_exists: true
+ 
++instance_raster_args:
++  # Save the postprocessed instance-ID raster that is used for polygonization.
++  # Positive values are field instance IDs, negative values are background IDs, and 0 is nodata/background.
++  save: false
++  output_root: null
++  always_region_suffix: false
++
+ filtering_args:
+   # if True - automatically scale minimum_area_m2, minimum_part_area_m2, minimum_hole_area_m2 proportionally to pixel area of the input imagery
+   automatic_area_scale: True
+@@ -96,4 +103,4 @@ simplification_args:
+   # how many processes spawn for the task. -1 - all available cpus
+   num_workers: -1
+   # 1 byte per pixel => 65k*65k = 4GB, 32k*32k = 1GB. Some system cant handle arrays bigger than 32k*32k due to int overflow
+-  raster_resolution: -1
+\ No newline at end of file
++  raster_resolution: -1
+diff --git a/methods/main/PostprocHandler.py b/methods/main/PostprocHandler.py
+index 1a73f8f..d0c75b9 100644
+--- a/methods/main/PostprocHandler.py
++++ b/methods/main/PostprocHandler.py
+@@ -1,5 +1,6 @@
+-import numpy as np
+-import time
++import os
++import numpy as np
++import time
+ 
+ import multiprocessing
+ from multiprocessing import shared_memory
+@@ -7,7 +8,7 @@ from multiprocessing import shared_memory
+ from .UnitedWorker import UnitedWorker
+ from .IDMapper import IncrementalFastMapper
+ 
+-from osgeo import ogr
++from osgeo import gdal, ogr
+ import logging
+ 
+ import cv2
+@@ -156,9 +157,9 @@ class PostprocHandler:
+         mask = self.instances_map < 2
+         self.instances_map[mask] = -background[mask]
+ 
+-    def polygonize(self, geotransform, layer_info):
+-        t0 = time.time()
+-        gpkg_path, layer_name = layer_info
++    def polygonize(self, geotransform, layer_info):
++        t0 = time.time()
++        gpkg_path, layer_name = layer_info
+ 
+         workers_in_flight = 0
+         di = self.instances_map.shape[0] // self.num_workers_grid[0]
+@@ -213,10 +214,41 @@ class PostprocHandler:
+         except Exception as e:
+             out_layer.RollbackTransaction()
+             raise e
+-
+-        logger.debug(f"Polygonization finished in {time.time() - t0} s.")
+-
+-    def dispose(self):
++
++        logger.debug(f"Polygonization finished in {time.time() - t0} s.")
++
++    def save_instance_raster(self, output_path, geotransform):
++        t0 = time.time()
++        output_dir = os.path.dirname(output_path)
++        if output_dir:
++            os.makedirs(output_dir, exist_ok=True)
++
++        driver = gdal.GetDriverByName("GTiff")
++        options = [
++            "BIGTIFF=IF_SAFER",
++            "COMPRESS=DEFLATE",
++            "PREDICTOR=2",
++            "TILED=YES",
++            "NUM_THREADS=ALL_CPUS",
++        ]
++        height, width = self.instances_map.shape
++        dataset = driver.Create(output_path, width, height, 1, gdal.GDT_Int32, options)
++        if dataset is None:
++            raise RuntimeError(f"Could not create instance raster: {output_path}")
++
++        dataset.SetGeoTransform(geotransform)
++        dataset.SetProjection(self.srs_wkt)
++        band = dataset.GetRasterBand(1)
++        band.SetNoDataValue(0)
++        band.SetDescription("instance_id")
++        band.WriteArray(self.instances_map)
++        band.FlushCache()
++        dataset.FlushCache()
++        dataset = None
++
++        logger.info(f"Instance raster saved to {output_path} in {time.time() - t0:.2f} s.")
++
++    def dispose(self):
+         for worker in self.workers_list:
+             worker.queue.put(UnitedWorker.MODE_TERMINATE)
+ 
+@@ -256,4 +288,4 @@ class PostprocHandler:
+                 self.workers_load[process_id] = 0
+                 
+         for i in range(self.num_workers):
+-            self.workers_list[i].start_running.wait()
+\ No newline at end of file
++            self.workers_list[i].start_running.wait()
+diff --git a/methods/main/inference.py b/methods/main/inference.py
+index d0e7c73..49b42a7 100644
+--- a/methods/main/inference.py
++++ b/methods/main/inference.py
+@@ -217,11 +217,35 @@ def execute_simplification(gpkg_path, layer_name, config, scale):
+         "unique_id_column": "id"
+     }
+ 
+-    simplify.simplify(full_config)
+-
+-
+-
+-def execute_delineation(models, planner, postproc_config, passes, dataloader_config, layer_info, lclu_path, lclu_config, full_config, device):
++    simplify.simplify(full_config)
++
++
++def get_instance_raster_path(config, gpkg_path, region_counter, current_region, num_regions):
++    instance_config = config.get("instance_raster_args", {})
++    if not instance_config.get("save", False):
++        return None
++
++    tile_name = os.path.splitext(os.path.basename(gpkg_path))[0]
++    output_root = instance_config.get("output_root")
++    if output_root is None:
++        output_root = os.path.join(os.path.dirname(gpkg_path), "instance_rasters")
++
++    tile_output_dir = os.path.join(output_root, tile_name)
++    os.makedirs(tile_output_dir, exist_ok=True)
++
++    always_region_suffix = instance_config.get("always_region_suffix", False)
++    if num_regions == 1 and not always_region_suffix:
++        filename = f"{tile_name}.instances.tif"
++    else:
++        filename = (
++            f"{tile_name}.region_{region_counter:04d}"
++            f"_x{current_region[0]}_y{current_region[1]}.instances.tif"
++        )
++    return os.path.join(tile_output_dir, filename)
++
++
++
++def execute_delineation(models, planner, postproc_config, passes, dataloader_config, layer_info, lclu_path, lclu_config, full_config, device):
+     gpkg = ogr.Open(layer_info[0], 1)
+     out_layer = gpkg.GetLayerByName(layer_info[1])
+     srs = out_layer.GetSpatialRef()
+@@ -317,11 +341,21 @@ def execute_delineation(models, planner, postproc_config, passes, dataloader_con
+ 
+             postproc_handler.map()
+ 
+-            background = background_loader.get_background(planner.get_geotransform(), planner.region_size[0], planner.region_size[1], srs_wkt)
+-            postproc_handler.apply_background(background)
+-
+-            postproc_handler.polygonize(planner.get_geotransform(), layer_info)
+-            postproc_handler.clear()
++            background = background_loader.get_background(planner.get_geotransform(), planner.region_size[0], planner.region_size[1], srs_wkt)
++            postproc_handler.apply_background(background)
++
++            instance_raster_path = get_instance_raster_path(
++                full_config,
++                layer_info[0],
++                region_counter,
++                planner.current_region,
++                num_regions,
++            )
++            if instance_raster_path is not None:
++                postproc_handler.save_instance_raster(instance_raster_path, planner.get_geotransform())
++
++            postproc_handler.polygonize(planner.get_geotransform(), layer_info)
++            postproc_handler.clear()
+ 
+             region_counter += 1
+ 
+@@ -467,4 +501,4 @@ def warp_lclu(src, dst, sample_tiff, total_bounds, pixel_size, warp_options):
+             callback=warping_progress_callback,
+         )
+ 
+-    return temp_lclu_tiff_path
+\ No newline at end of file
++    return temp_lclu_tiff_path
+-- 
+2.50.1 (Apple Git-155)
+

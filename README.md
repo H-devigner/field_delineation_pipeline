@@ -310,6 +310,7 @@ field_delineation_pipeline/runs/<run_name>/
   05_delineate_configs/conf_pipeline.yaml
   05_delineate_configs/batch_pipeline.yaml
   06_delineated/<tile_id>.gpkg
+  06_instance_rasters/<tile_id>/<tile_id>.instances.tif # only with --save-instance-rasters
   07_exports/
     exports_summary.csv
     exports_summary.json
@@ -334,6 +335,8 @@ Delineate-Anything/data/masks/<tile_id>.tif
 
 Use `--stage-mode symlink` for large country runs if you want to avoid duplicating `sr.tif` into `Delineate-Anything/data`.
 
+Use `--save-instance-rasters` when you want to preserve Delineate-Anything's postprocessed instance-ID raster before polygonization. Positive values are field instance IDs, negative values are background IDs, and `0` is nodata/background. These rasters are intended for later cross-tile seam merging.
+
 ## Main Functions
 
 `load_aoi`: reads GeoJSON, Shapefile, GPKG, or WKT AOIs and normalizes CRS.
@@ -353,6 +356,8 @@ Use `--stage-mode symlink` for large country runs if you want to avoid duplicati
 `stage_tile_for_delineation`: stages `sr.tif` and `<tile_id>.tif` masks into `Delineate-Anything/data`.
 
 `write_delineate_configs` and `run_delineate`: generate the batch/config YAML files and execute `delineate.py`.
+
+`--save-instance-rasters`: writes `06_instance_rasters/<tile_id>/*.instances.tif` from Delineate-Anything immediately before polygonization.
 
 `export_results`: converts final GeoPackages into WGS84 GeoJSON/KML, boundary quicklook PNGs, optional SR-overlay PNGs, summary CSV/JSON, and an `index.html` gallery.
 

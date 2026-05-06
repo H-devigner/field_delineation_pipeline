@@ -175,6 +175,8 @@ def parse_args() -> argparse.Namespace:
     da.add_argument("--mask-clip-classes", default="0,6,7,8")
     da.add_argument("--delineate-output-root", default=None, type=Path)
     da.add_argument("--keep-delineate-temp", action="store_true")
+    da.add_argument("--save-instance-rasters", action="store_true", help="Save Delineate-Anything postprocessed instance-ID rasters before polygonization.")
+    da.add_argument("--instance-raster-output-root", default=None, type=Path, help="Output root for instance rasters. Defaults to <run>/06_instance_rasters.")
     da.add_argument("--stage-mode", default="copy", choices=["copy", "symlink"], help="How to stage SR/masks into Delineate-Anything/data.")
     da.add_argument("--python-executable", default=sys.executable, help="Python executable for Delineate-Anything CLI.")
     da.add_argument("--verbose-delineate", action="store_true")
@@ -489,6 +491,32 @@ def check_python_environment(args: argparse.Namespace) -> None:
             + ", ".join(missing)
             + ". Activate the shared conda environment or install these packages before running."
         )
+
+
+def check_delineate_instance_raster_support(args: argparse.Namespace) -> None:
+    if args.skip_delineation or not args.save_instance_rasters:
+        return
+
+    inference_path = DELINEATE_ROOT / "methods" / "main" / "inference.py"
+    postproc_path = DELINEATE_ROOT / "methods" / "main" / "PostprocHandler.py"
+    patch_path = PIPELINE_ROOT / "patches" / "delineate-anything-instance-rasters.patch"
+
+    try:
+        inference_text = inference_path.read_text(encoding="utf-8")
+        postproc_text = postproc_path.read_text(encoding="utf-8")
+    except FileNotFoundError as exc:
+        raise FileNotFoundError(
+            "Delineate-Anything is missing or incomplete. Run with --clone-missing or clone the component repo."
+        ) from exc
+
+    if "instance_raster_args" in inference_text and "save_instance_raster" in postproc_text:
+        return
+
+    raise RuntimeError(
+        "Delineate-Anything does not have instance raster export support yet. Apply the bundled patch first:\n"
+        f"  cd {DELINEATE_ROOT}\n"
+        f"  git am --whitespace=nowarn {patch_path}"
+    )
 
 
 def import_geospatial_stack() -> tuple[Any, Any, Any]:
@@ -1448,6 +1476,12 @@ def write_delineate_configs(
     config["mask_info"]["filter_classes"] = parse_int_csv(args.mask_filter_classes)
     config["mask_info"]["clip_classes"] = parse_int_csv(args.mask_clip_classes)
     config["data_loader"]["bands"] = parse_int_csv(args.delineate_bands)
+    instance_raster_output_root = args.instance_raster_output_root or (run_dir / "06_instance_rasters")
+    config["instance_raster_args"] = {
+        "save": bool(args.save_instance_rasters),
+        "output_root": str(instance_raster_output_root.resolve()),
+        "always_region_suffix": False,
+    }
     for pass_config in config["passes"]:
         pass_config["batch_size"] = args.delineate_batch_size
         for model_args in pass_config.get("model_args", []):
@@ -1613,6 +1647,7 @@ def main() -> None:
     with timed_step(summary, run_dir, "preflight"):
         ensure_repositories(args.clone_missing, required_component_repositories(args))
         check_python_environment(args)
+        check_delineate_instance_raster_support(args)
         if args.basemap_auto_skipped_super_resolution:
             LOGGER.info("Basemap input is already high-resolution imagery; OpenSR is skipped unless --basemap-run-super-resolution is set.")
         LOGGER.info("Pipeline root: %s", PIPELINE_ROOT)
