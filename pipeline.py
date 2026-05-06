@@ -515,7 +515,10 @@ def check_delineate_instance_raster_support(args: argparse.Namespace) -> None:
     raise RuntimeError(
         "Delineate-Anything does not have instance raster export support yet. Apply the bundled patch first:\n"
         f"  cd {DELINEATE_ROOT}\n"
-        f"  git am --whitespace=nowarn {patch_path}"
+        f"  git am --whitespace=nowarn {patch_path}\n"
+        "If that patch does not match your local Delineate-Anything checkout, run the tolerant installer instead:\n"
+        f"  cd {PIPELINE_ROOT}\n"
+        "  python patches/apply_delineate_instance_rasters.py Delineate-Anything"
     )
 
 
