@@ -337,6 +337,18 @@ Use `--stage-mode symlink` for large country runs if you want to avoid duplicati
 
 Use `--save-instance-rasters` when you want to preserve Delineate-Anything's postprocessed instance-ID raster before polygonization. Positive values are field instance IDs, negative values are background IDs, and `0` is nodata/background. These rasters are intended for later cross-tile seam merging.
 
+Standalone instance-raster postprocessing:
+
+```bash
+python postprocess_instance_rasters.py \
+  --instance-root "$RUNS/$RUN/06_instance_rasters" \
+  --output-dir "$RUNS/$RUN/08_instance_postprocess" \
+  --output-name "$RUN" \
+  --merge-touching
+```
+
+This writes `<run>.merged_fields.gpkg`, `<run>.merged_fields.geojson`, `<run>.merged_fields.png`, and `<run>.merge_summary.json`. By default overlapping IDs from different rasters are merged. `--merge-touching` also merges IDs that touch or nearly touch across artificial tile seams; inspect the quicklook and summary after the first run.
+
 ## Main Functions
 
 `load_aoi`: reads GeoJSON, Shapefile, GPKG, or WKT AOIs and normalizes CRS.
@@ -358,6 +370,8 @@ Use `--save-instance-rasters` when you want to preserve Delineate-Anything's pos
 `write_delineate_configs` and `run_delineate`: generate the batch/config YAML files and execute `delineate.py`.
 
 `--save-instance-rasters`: writes `06_instance_rasters/<tile_id>/*.instances.tif` from Delineate-Anything immediately before polygonization.
+
+`postprocess_instance_rasters`: polygonizes positive instance IDs, reconciles cross-raster seam IDs, dissolves merged fields, and writes global GPKG/GeoJSON/PNG outputs.
 
 `export_results`: converts final GeoPackages into WGS84 GeoJSON/KML, boundary quicklook PNGs, optional SR-overlay PNGs, summary CSV/JSON, and an `index.html` gallery.
 
