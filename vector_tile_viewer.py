@@ -76,6 +76,26 @@ HTML_TEMPLATE = """<!doctype html>
     input[type="range"] {{
       width: 100%;
     }}
+    input[type="number"] {{
+      width: 100%;
+      min-width: 0;
+      box-sizing: border-box;
+      border: 1px solid rgba(0, 0, 0, 0.25);
+      border-radius: 6px;
+      padding: 6px 7px;
+      font: inherit;
+    }}
+    .stack {{
+      display: grid;
+      gap: 6px;
+      min-width: 0;
+    }}
+    .status {{
+      margin-top: 8px;
+      font-size: 11px;
+      color: #555;
+      line-height: 1.35;
+    }}
     button {{
       border: 1px solid #1f2937;
       background: #1f2937;
@@ -115,10 +135,23 @@ HTML_TEMPLATE = """<!doctype html>
       <label for="line-width">Line Width</label>
       <input id="line-width" type="range" min="0.1" max="2.5" value="0.8" step="0.1" />
     </div>
+    <div class="row">
+      <label for="min-area">Min Area</label>
+      <div class="stack">
+        <input id="min-area" type="number" min="0" value="0" step="100" />
+        <input id="area-slider" type="range" min="0" max="1000" value="0" step="1" />
+      </div>
+    </div>
+    <button id="reset-area" class="secondary">Reset Area</button>
+    <div id="area-status" class="status"></div>
   </div>
   <script>
     const config = {config_json};
     const bounds = config.bounds;
+    const areaFilter = config.areaFilter || {{ available: false }};
+    const areaStats = areaFilter.stats || {{}};
+    const areaMax = Math.max(0, Number(areaStats.max || 0));
+    const areaField = areaFilter.field || "area";
 
     const map = new maplibregl.Map({{
       container: "map",
@@ -188,6 +221,7 @@ HTML_TEMPLATE = """<!doctype html>
 
     map.on("load", () => {{
       map.fitBounds(bounds, {{ padding: 40, duration: 0 }});
+      applyAreaThreshold(currentAreaThreshold());
     }});
 
     map.on("click", "fields-fill", (event) => {{
@@ -221,6 +255,96 @@ HTML_TEMPLATE = """<!doctype html>
 
     document.getElementById("line-width").addEventListener("input", (event) => {{
       map.setPaintProperty("fields-line", "line-width", Number(event.target.value));
+    }});
+
+    const minAreaInput = document.getElementById("min-area");
+    const areaSlider = document.getElementById("area-slider");
+    const areaStatus = document.getElementById("area-status");
+    const resetArea = document.getElementById("reset-area");
+
+    function formatArea(value) {{
+      return new Intl.NumberFormat(undefined, {{ maximumFractionDigits: 0 }}).format(Math.max(0, Number(value || 0)));
+    }}
+
+    function sliderToArea(sliderValue) {{
+      if (!areaMax) return Number(sliderValue || 0);
+      const t = Math.max(0, Math.min(1, Number(sliderValue) / 1000));
+      return Math.round(Math.expm1(Math.log1p(areaMax) * t));
+    }}
+
+    function areaToSlider(areaValue) {{
+      if (!areaMax) return 0;
+      const area = Math.max(0, Math.min(areaMax, Number(areaValue || 0)));
+      return Math.round((Math.log1p(area) / Math.log1p(areaMax)) * 1000);
+    }}
+
+    function areaExpression(threshold) {{
+      return [">=", ["to-number", ["get", areaField], -1], Number(threshold || 0)];
+    }}
+
+    function setLayerFilter(threshold) {{
+      const filter = areaExpression(threshold);
+      if (map.getLayer("fields-fill")) map.setFilter("fields-fill", filter);
+      if (map.getLayer("fields-line")) map.setFilter("fields-line", filter);
+    }}
+
+    function updateAreaStatus(threshold) {{
+      if (!areaFilter.available) {{
+        areaStatus.textContent = "Area filtering is unavailable because the vector tiles do not contain an area attribute.";
+        return;
+      }}
+      const maxText = areaMax ? ` / max ${{formatArea(areaMax)}}` : "";
+      areaStatus.textContent = `Showing fields with ${{areaField}} >= ${{formatArea(threshold)}}${{maxText}}`;
+    }}
+
+    function writeThresholdToUrl(threshold) {{
+      const url = new URL(window.location.href);
+      if (Number(threshold || 0) > 0) {{
+        url.searchParams.set("min_area", String(Math.round(Number(threshold))));
+      }} else {{
+        url.searchParams.delete("min_area");
+      }}
+      window.history.replaceState(null, "", url);
+    }}
+
+    function currentAreaThreshold() {{
+      const params = new URLSearchParams(window.location.search);
+      const fromUrl = Number(params.get("min_area"));
+      return Number.isFinite(fromUrl) && fromUrl > 0 ? fromUrl : Number(minAreaInput.value || 0);
+    }}
+
+    function applyAreaThreshold(threshold, updateUrl = false) {{
+      threshold = Math.max(0, Number(threshold || 0));
+      minAreaInput.value = String(Math.round(threshold));
+      areaSlider.value = String(areaToSlider(threshold));
+      if (areaFilter.available) {{
+        setLayerFilter(threshold);
+      }}
+      updateAreaStatus(threshold);
+      if (updateUrl) writeThresholdToUrl(threshold);
+    }}
+
+    if (!areaFilter.available) {{
+      minAreaInput.disabled = true;
+      areaSlider.disabled = true;
+      resetArea.disabled = true;
+    }} else {{
+      const initialThreshold = currentAreaThreshold();
+      minAreaInput.value = String(Math.round(initialThreshold));
+      areaSlider.value = String(areaToSlider(initialThreshold));
+    }}
+    updateAreaStatus(currentAreaThreshold());
+
+    minAreaInput.addEventListener("input", (event) => {{
+      applyAreaThreshold(event.target.value, true);
+    }});
+
+    areaSlider.addEventListener("input", (event) => {{
+      applyAreaThreshold(sliderToArea(event.target.value), true);
+    }});
+
+    resetArea.addEventListener("click", () => {{
+      applyAreaThreshold(0, true);
     }});
   </script>
 </body>
@@ -302,6 +426,39 @@ def parse_property_list(value: str) -> list[str]:
     return [item.strip() for item in value.split(",") if item.strip()]
 
 
+def numeric_field_stats(layer: Any, field_name: str) -> dict[str, Any] | None:
+    layer_defn = layer.GetLayerDefn()
+    field_names = {layer_defn.GetFieldDefn(index).GetName() for index in range(layer_defn.GetFieldCount())}
+    if field_name not in field_names:
+        return None
+
+    min_value: float | None = None
+    max_value: float | None = None
+    count = 0
+    layer.ResetReading()
+    for feature in layer:
+        value = feature.GetField(field_name)
+        if value is None:
+            continue
+        try:
+            numeric_value = float(value)
+        except (TypeError, ValueError):
+            continue
+        min_value = numeric_value if min_value is None else min(min_value, numeric_value)
+        max_value = numeric_value if max_value is None else max(max_value, numeric_value)
+        count += 1
+    layer.ResetReading()
+
+    if count == 0 or min_value is None or max_value is None:
+        return None
+    return {
+        "field": field_name,
+        "min": min_value,
+        "max": max_value,
+        "count": count,
+    }
+
+
 def get_layer_info(vector_path: Path, layer_name: str | None) -> dict[str, Any]:
     try:
         from osgeo import ogr, osr
@@ -352,12 +509,14 @@ def get_layer_info(vector_path: Path, layer_name: str | None) -> dict[str, Any]:
     lats = [point[1] for point in corners]
     bounds = [min(lons), min(lats), max(lons), max(lats)]
     center = [(bounds[0] + bounds[2]) / 2.0, (bounds[1] + bounds[3]) / 2.0]
+    area_stats = numeric_field_stats(layer, "area")
 
     return {
         "input_layer": layer.GetName(),
         "feature_count": int(layer.GetFeatureCount()),
         "bounds": bounds,
         "center": center,
+        "area_stats": area_stats,
     }
 
 
@@ -451,7 +610,13 @@ def build(args: argparse.Namespace) -> None:
 
     layer_info = get_layer_info(input_path, args.input_layer)
     input_layer = layer_info["input_layer"]
+    properties = parse_property_list(args.include_properties)
+    area_filter_available = layer_info.get("area_stats") is not None and "area" in properties
     LOGGER.info("Input layer=%s features=%s", input_layer, layer_info["feature_count"])
+    if layer_info.get("area_stats") is not None:
+        LOGGER.info("Area range: %s to %s", layer_info["area_stats"]["min"], layer_info["area_stats"]["max"])
+    if layer_info.get("area_stats") is not None and "area" not in properties:
+        LOGGER.warning("The input has an area field, but it is not included in vector-tile properties; viewer-side area filtering will be disabled.")
 
     ogr2ogr = require_tool("ogr2ogr", "Install GDAL CLI tools, e.g. conda install -c conda-forge gdal.")
     tippecanoe = require_tool("tippecanoe", "Install tippecanoe, e.g. conda install -c conda-forge tippecanoe.")
@@ -472,7 +637,7 @@ def build(args: argparse.Namespace) -> None:
             tile_layer=args.tile_layer,
             minzoom=args.minzoom,
             maxzoom=args.maxzoom,
-            properties=parse_property_list(args.include_properties),
+            properties=properties,
             keep_all=args.keep_all,
         )
     else:
@@ -494,7 +659,7 @@ def build(args: argparse.Namespace) -> None:
                 tile_layer=args.tile_layer,
                 minzoom=args.minzoom,
                 maxzoom=args.maxzoom,
-                properties=parse_property_list(args.include_properties),
+                properties=properties,
                 keep_all=args.keep_all,
             )
 
@@ -512,6 +677,11 @@ def build(args: argparse.Namespace) -> None:
         "input": str(input_path),
         "inputLayer": input_layer,
         "featureCount": layer_info["feature_count"],
+        "areaFilter": {
+            "available": area_filter_available,
+            "field": "area",
+            "stats": layer_info.get("area_stats"),
+        },
     }
     write_viewer(output_dir, config)
     LOGGER.info("Viewer package written to %s", output_dir)

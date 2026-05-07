@@ -367,6 +367,8 @@ python vector_tile_viewer.py serve \
 
 The build step requires `tippecanoe` and GDAL command-line tools. In conda, install them with `conda install -c conda-forge tippecanoe gdal`.
 
+The generated viewer includes a live `Min Area` filter when the `area` attribute is present in the vector tiles. The default build keeps `area`, so you can test candidate thresholds in the browser without generating multiple filtered GPKG/GeoJSON files. The current threshold is also reflected in the URL as `?min_area=...` so you can bookmark or share it.
+
 ## Main Functions
 
 `load_aoi`: reads GeoJSON, Shapefile, GPKG, or WKT AOIs and normalizes CRS.
