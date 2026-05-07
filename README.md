@@ -349,6 +349,24 @@ python postprocess_instance_rasters.py \
 
 This writes `<run>.merged_fields.gpkg`, `<run>.merged_fields.geojson`, `<run>.merged_fields.png`, and `<run>.merge_summary.json`. By default overlapping IDs from different rasters are merged. `--merge-touching` also merges IDs that touch or nearly touch across artificial tile seams; inspect the quicklook and summary after the first run.
 
+For interactive exploration of huge merged outputs, build vector tiles and serve a browser map:
+
+```bash
+python vector_tile_viewer.py build \
+  --input "$RUNS/$RUN/08_instance_postprocess/$RUN.merged_fields.gpkg" \
+  --output-dir "$RUNS/$RUN/09_field_viewer" \
+  --name "$RUN" \
+  --maxzoom 16 \
+  --work-dir "$RUNS/$RUN/09_field_viewer/tmp"
+
+python vector_tile_viewer.py serve \
+  --viewer-dir "$RUNS/$RUN/09_field_viewer" \
+  --host 0.0.0.0 \
+  --port 8088
+```
+
+The build step requires `tippecanoe` and GDAL command-line tools. In conda, install them with `conda install -c conda-forge tippecanoe gdal`.
+
 ## Main Functions
 
 `load_aoi`: reads GeoJSON, Shapefile, GPKG, or WKT AOIs and normalizes CRS.
@@ -372,6 +390,8 @@ This writes `<run>.merged_fields.gpkg`, `<run>.merged_fields.geojson`, `<run>.me
 `--save-instance-rasters`: writes `06_instance_rasters/<tile_id>/*.instances.tif` from Delineate-Anything immediately before polygonization.
 
 `postprocess_instance_rasters`: polygonizes positive instance IDs, reconciles cross-raster seam IDs, dissolves merged fields, and writes global GPKG/GeoJSON/PNG outputs.
+
+`vector_tile_viewer`: packages large GPKG/GeoJSON outputs into MBTiles vector tiles and serves a MapLibre basemap viewer.
 
 `export_results`: converts final GeoPackages into WGS84 GeoJSON/KML, boundary quicklook PNGs, optional SR-overlay PNGs, summary CSV/JSON, and an `index.html` gallery.
 
