@@ -168,7 +168,7 @@ def parse_args() -> argparse.Namespace:
     da = parser.add_argument_group("Delineate-Anything")
     da.add_argument("--skip-delineation", action="store_true")
     da.add_argument("--delineate-models", default="large", help="Comma-separated Delineate-Anything models.")
-    da.add_argument("--delineate-bands", default="3,2,1", help="GDAL band indexes passed to Delineate-Anything.")
+    da.add_argument("--delineate-bands", default="1,2,3", help="GDAL band indexes passed to Delineate-Anything.")
     da.add_argument("--delineate-batch-size", default=-1, type=int, help="-1 lets Delineate-Anything auto-select.")
     da.add_argument("--mask-range", default=9, type=int, help="Mask class range. Dynamic World label is 0..8.")
     da.add_argument("--mask-filter-classes", default="0,1,2,3,5,6,7,8")

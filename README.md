@@ -335,6 +335,8 @@ Delineate-Anything/data/masks/<tile_id>.tif
 
 Use `--stage-mode symlink` for large country runs if you want to avoid duplicating `sr.tif` into `Delineate-Anything/data`.
 
+The pipeline defaults to `--delineate-bands 1,2,3` for Delineate-Anything because the staged `sr.tif` files are already in RGB order. Override this only if your staged imagery has a different band layout.
+
 Use `--save-instance-rasters` when you want to preserve Delineate-Anything's postprocessed instance-ID raster before polygonization. Positive values are field instance IDs, negative values are background IDs, and `0` is nodata/background. These rasters are intended for later cross-tile seam merging.
 
 Standalone instance-raster postprocessing:
