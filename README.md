@@ -7,8 +7,8 @@ This folder contains one orchestrated pipeline for the workflow you were running
 3. clip mosaics to the AOI by default
 4. download Dynamic World LCLU masks with Earth Engine
 5. run `opensr-model` super-resolution
-6. stage `sr.tif` and masks into `Delineate-Anything/data`
-7. run `Delineate-Anything` batch inference
+6. stage `sr.tif` and masks into the selected delineation backend
+7. run batch inference with `Delineate-Anything` or the Detectron2 field model
 
 The main entrypoint is [pipeline.py](/Users/houcine/Desktop/from_oci/field_delineation_pipeline/pipeline.py).
 
@@ -333,11 +333,38 @@ Delineate-Anything/data/images/<tile_id>/sr.tif
 Delineate-Anything/data/masks/<tile_id>.tif
 ```
 
-Use `--stage-mode symlink` for large country runs if you want to avoid duplicating `sr.tif` into `Delineate-Anything/data`.
+The Detectron2 backend stages the same inputs into:
 
-The pipeline defaults to `--delineate-bands 1,2,3` for Delineate-Anything because the staged `sr.tif` files are already in RGB order. Override this only if your staged imagery has a different band layout.
+```text
+<detectron2-root>/data/delineation/images/<tile_id>/sr.tif
+<detectron2-root>/data/delineation/masks/<tile_id>.tif
+```
 
-Use `--save-instance-rasters` when you want to preserve Delineate-Anything's postprocessed instance-ID raster before polygonization. Positive values are field instance IDs, negative values are background IDs, and `0` is nodata/background. These rasters are intended for later cross-tile seam merging.
+Use `--stage-mode symlink` for large country runs if you want to avoid duplicating `sr.tif` into the backend data folder.
+
+The pipeline defaults to `--delineate-bands 1,2,3` because the staged `sr.tif` files are already in RGB order. Override this only if your staged imagery has a different band layout.
+
+## Detectron2 Backend
+
+This branch can run the Detectron2 delineation project instead of the original `Delineate-Anything` CLI:
+
+```bash
+python pipeline.py \
+  --delineation-backend detectron2 \
+  --detectron2-root /path/to/roboflow_data_explore \
+  --detectron2-model-weights /path/to/model_final.pth \
+  --aoi /path/to/aoi.geojson \
+  --start-date 2025-07-01 \
+  --end-date 2025-12-31 \
+  --run-name detectron2_test \
+  --resume
+```
+
+If `--detectron2-root` is omitted, the pipeline checks `DETECTRON2_DELINEATE_ROOT`, then common sibling folders such as `Delineate-Anything_just_folders_keeper/roboflow_data_explore`. Detectron2 outputs default to `06_delineated_detectron2`; pass `--detectron2-output-root` or the existing `--delineate-output-root` to choose a different folder.
+
+The Detectron2 project uses `scripts/infer.py -b` and `configs/inference.yaml`, so it is not a literal drop-in replacement for `Delineate-Anything/delineate.py`. The pipeline generates matching Detectron2 config files under `05_delineate_configs/`.
+
+Use `--save-instance-rasters` with the `delineate-anything` backend when you want to preserve Delineate-Anything's postprocessed instance-ID raster before polygonization. Positive values are field instance IDs, negative values are background IDs, and `0` is nodata/background. These rasters are intended for later cross-tile seam merging. The Detectron2 backend currently writes GPKGs/GeoJSON but does not expose that old instance-raster hook.
 
 Standalone instance-raster postprocessing:
 
@@ -387,9 +414,11 @@ The generated viewer includes a live `Min Area` filter when the `area` attribute
 
 `OpenSRRunner.run`: loads OpenSR once, uses CUDA when available, and writes `04_super_resolution/<tile_id>/sr.tif`.
 
-`stage_tile_for_delineation`: stages `sr.tif` and `<tile_id>.tif` masks into `Delineate-Anything/data`.
+`stage_tile_for_delineation` / `stage_tile_for_detectron2`: stages `sr.tif` and `<tile_id>.tif` masks into the selected backend data folder.
 
-`write_delineate_configs` and `run_delineate`: generate the batch/config YAML files and execute `delineate.py`.
+`write_delineate_configs` / `write_detectron2_configs`: generate backend-specific batch/config YAML files.
+
+`run_delineate` / `run_detectron2_delineate`: execute the selected backend CLI.
 
 `--save-instance-rasters`: writes `06_instance_rasters/<tile_id>/*.instances.tif` from Delineate-Anything immediately before polygonization.
 
@@ -414,6 +443,8 @@ python export_results.py runs/small_aoi_test/06_delineated \
 `opensr-model` uses CUDA if PyTorch sees it. The default `--gpus 0,1,2,3,4,5,6,7` passes all eight GPUs to `opensr-utils`.
 
 `Delineate-Anything` chooses CUDA automatically when `torch.cuda.is_available()` is true. Its batch size defaults to `-1`, so the Delineate-Anything code estimates a batch size from free GPU memory.
+
+The Detectron2 backend uses the configured `performance.num_gpus`; by default the pipeline sets that to the number of IDs passed in `--gpus`.
 
 ## LCLU Defaults
 

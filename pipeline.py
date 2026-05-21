@@ -8,7 +8,7 @@ The pipeline is intentionally modular:
 3. optionally clip mosaics to the AOI
 4. download Dynamic World LCLU masks
 5. run OpenSR super-resolution or stage the mosaic directly
-6. stage inputs for Delineate-Anything and run its batch CLI
+6. stage inputs for the selected delineation backend and run its batch CLI
 """
 
 from __future__ import annotations
@@ -38,6 +38,22 @@ S2MOSAIC_ROOT = PIPELINE_ROOT / "S2Mosaic"
 OPENSR_ROOT = PIPELINE_ROOT / "opensr-model"
 DELINEATE_ROOT = PIPELINE_ROOT / "Delineate-Anything"
 DEFAULT_TILE_GRID = S2MOSAIC_ROOT / "s2mosaic" / "sentinel_2_index.gpkg"
+
+
+def default_detectron2_root() -> Path:
+    env_root = os.environ.get("DETECTRON2_DELINEATE_ROOT")
+    if env_root:
+        return Path(env_root).expanduser()
+
+    candidates = [
+        PIPELINE_ROOT / "roboflow_data_explore",
+        PIPELINE_ROOT / "Delineate-Detectron2",
+        PIPELINE_ROOT.parent / "Delineate-Anything_just_folders_keeper" / "roboflow_data_explore",
+    ]
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return candidates[0]
 
 REPO_SPECS = {
     "S2Mosaic": {
@@ -165,10 +181,16 @@ def parse_args() -> argparse.Namespace:
     sr.add_argument("--opensr-batch-size", default=2, type=int)
     sr.add_argument("--gpus", default="0,1,2,3,4,5,6,7", help="GPU IDs for OpenSR and CUDA_VISIBLE_DEVICES.")
 
-    da = parser.add_argument_group("Delineate-Anything")
+    da = parser.add_argument_group("Delineation")
     da.add_argument("--skip-delineation", action="store_true")
+    da.add_argument(
+        "--delineation-backend",
+        default="delineate-anything",
+        choices=["delineate-anything", "detectron2"],
+        help="Delineation backend to run after SR staging.",
+    )
     da.add_argument("--delineate-models", default="large", help="Comma-separated Delineate-Anything models.")
-    da.add_argument("--delineate-bands", default="1,2,3", help="GDAL band indexes passed to Delineate-Anything.")
+    da.add_argument("--delineate-bands", default="1,2,3", help="GDAL band indexes passed to the delineation backend.")
     da.add_argument("--delineate-batch-size", default=-1, type=int, help="-1 lets Delineate-Anything auto-select.")
     da.add_argument("--mask-range", default=9, type=int, help="Mask class range. Dynamic World label is 0..8.")
     da.add_argument("--mask-filter-classes", default="0,1,2,3,5,6,7,8")
@@ -177,9 +199,16 @@ def parse_args() -> argparse.Namespace:
     da.add_argument("--keep-delineate-temp", action="store_true")
     da.add_argument("--save-instance-rasters", action="store_true", help="Save Delineate-Anything postprocessed instance-ID rasters before polygonization.")
     da.add_argument("--instance-raster-output-root", default=None, type=Path, help="Output root for instance rasters. Defaults to <run>/06_instance_rasters.")
-    da.add_argument("--stage-mode", default="copy", choices=["copy", "symlink"], help="How to stage SR/masks into Delineate-Anything/data.")
-    da.add_argument("--python-executable", default=sys.executable, help="Python executable for Delineate-Anything CLI.")
+    da.add_argument("--stage-mode", default="copy", choices=["copy", "symlink"], help="How to stage SR/masks into the backend data folder.")
+    da.add_argument("--python-executable", default=sys.executable, help="Python executable for the delineation CLI.")
     da.add_argument("--verbose-delineate", action="store_true")
+    da.add_argument("--detectron2-root", default=default_detectron2_root(), type=Path, help="Root of the Detectron2 delineation project.")
+    da.add_argument("--detectron2-config", default=None, type=Path, help="Detectron2 inference config. Defaults to <detectron2-root>/configs/inference.yaml.")
+    da.add_argument("--detectron2-model-weights", default=None, type=Path, help="Override model.model_weights in the Detectron2 config.")
+    da.add_argument("--detectron2-model-config-file", default=None, help="Override model.config_file in the Detectron2 config.")
+    da.add_argument("--detectron2-score-threshold", default=None, type=float, help="Override model.score_threshold in the Detectron2 config.")
+    da.add_argument("--detectron2-num-gpus", default=None, type=int, help="Override performance.num_gpus in the Detectron2 config.")
+    da.add_argument("--detectron2-output-root", default=None, type=Path, help="Output root for Detectron2 GPKGs. Defaults to <run>/06_delineated_detectron2.")
 
     exports = parser.add_argument_group("Exports")
     exports.add_argument("--skip-exports", action="store_true", help="Skip GeoJSON/KML/PNG export step.")
@@ -419,11 +448,41 @@ def required_component_repositories(args: argparse.Namespace) -> set[str]:
     required: set[str] = set()
     if args.input_mode == "sentinel2":
         required.add("S2Mosaic")
-    if not args.tiles_only:
+    if not args.tiles_only and args.delineation_backend == "delineate-anything":
         required.add("Delineate-Anything")
     if not args.skip_super_resolution:
         required.add("opensr-model")
     return required
+
+
+def resolve_detectron2_root(args: argparse.Namespace) -> Path:
+    return Path(args.detectron2_root).expanduser().resolve()
+
+
+def resolve_detectron2_config_path(args: argparse.Namespace) -> Path:
+    root = resolve_detectron2_root(args)
+    config_path = args.detectron2_config or (root / "configs" / "inference.yaml")
+    config_path = Path(config_path).expanduser()
+    if config_path.is_absolute():
+        return config_path.resolve()
+
+    root_relative = root / config_path
+    if root_relative.exists():
+        return root_relative.resolve()
+    return config_path.resolve()
+
+
+def resolve_detectron2_weights_path(root: Path, weights_path: str | Path | None) -> Path | None:
+    if weights_path is None:
+        return None
+    value = str(weights_path)
+    if "://" in value:
+        return None
+
+    path = Path(value).expanduser()
+    if path.is_absolute():
+        return path.resolve()
+    return (root / path).resolve()
 
 
 def check_imports(requirements: dict[str, str]) -> list[str]:
@@ -435,6 +494,7 @@ def check_imports(requirements: dict[str, str]) -> list[str]:
 
 
 def check_python_environment(args: argparse.Namespace) -> None:
+    will_run_delineation = not args.skip_delineation and not getattr(args, "tiles_only", False)
     requirements = {
         "geopandas": "geopandas",
         "numpy": "numpy",
@@ -463,7 +523,7 @@ def check_python_environment(args: argparse.Namespace) -> None:
                 "torch": "torch",
             }
         )
-    if not args.skip_delineation:
+    if will_run_delineation and args.delineation_backend == "delineate-anything":
         if str(DELINEATE_ROOT) not in sys.path:
             sys.path.insert(0, str(DELINEATE_ROOT))
         requirements.update(
@@ -475,6 +535,24 @@ def check_python_environment(args: argparse.Namespace) -> None:
                 "torch": "torch",
                 "tqdm": "tqdm",
                 "ultralytics": "ultralytics",
+            }
+        )
+    if will_run_delineation and args.delineation_backend == "detectron2":
+        detectron2_root = resolve_detectron2_root(args)
+        for import_root in (detectron2_root, detectron2_root / "detectron2"):
+            if str(import_root) not in sys.path:
+                sys.path.insert(0, str(import_root))
+        requirements.update(
+            {
+                "affine": "affine",
+                "cv2": "opencv-python",
+                "detectron2": "detectron2",
+                "osgeo": "gdal",
+                "psutil": "psutil",
+                "rasterio": "rasterio",
+                "scipy": "scipy",
+                "torch": "torch",
+                "tqdm": "tqdm",
             }
         )
     if not args.skip_exports:
@@ -494,7 +572,12 @@ def check_python_environment(args: argparse.Namespace) -> None:
 
 
 def check_delineate_instance_raster_support(args: argparse.Namespace) -> None:
-    if args.skip_delineation or not args.save_instance_rasters:
+    if (
+        args.delineation_backend != "delineate-anything"
+        or args.skip_delineation
+        or getattr(args, "tiles_only", False)
+        or not args.save_instance_rasters
+    ):
         return
 
     inference_path = DELINEATE_ROOT / "methods" / "main" / "inference.py"
@@ -520,6 +603,74 @@ def check_delineate_instance_raster_support(args: argparse.Namespace) -> None:
         f"  cd {PIPELINE_ROOT}\n"
         "  python patches/apply_delineate_instance_rasters.py Delineate-Anything"
     )
+
+
+def deep_merge_dict(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
+    merged = dict(base)
+    for key, value in override.items():
+        if key in merged and isinstance(merged[key], dict) and isinstance(value, dict):
+            merged[key] = deep_merge_dict(merged[key], value)
+        else:
+            merged[key] = value
+    return merged
+
+
+def load_yaml_config_with_base(config_path: Path) -> dict[str, Any]:
+    try:
+        import yaml
+    except ImportError as exc:
+        raise ImportError("Install PyYAML before reading Detectron2 configs.") from exc
+
+    config_path = config_path.expanduser().resolve()
+    with config_path.open("r", encoding="utf-8") as handle:
+        config = yaml.safe_load(handle) or {}
+
+    base_ref = config.pop("base_config", None)
+    if not base_ref:
+        return config
+
+    base_path = Path(base_ref).expanduser()
+    if not base_path.is_absolute():
+        config_relative = config_path.parent / base_path
+        project_relative = config_path.parent.parent / base_path
+        base_path = project_relative if project_relative.exists() else config_relative
+    base_config = load_yaml_config_with_base(base_path)
+    return deep_merge_dict(base_config, config)
+
+
+def check_detectron2_delineation_support(args: argparse.Namespace) -> None:
+    if args.delineation_backend != "detectron2" or getattr(args, "tiles_only", False):
+        return
+    if args.save_instance_rasters:
+        raise RuntimeError(
+            "--save-instance-rasters is currently supported only by the Delineate-Anything backend. "
+            "Run Detectron2 without that flag, or add an instance-raster export hook to the Detectron2 project."
+        )
+
+    root = resolve_detectron2_root(args)
+    config_path = resolve_detectron2_config_path(args)
+    required_paths = [
+        root / "scripts" / "infer.py",
+        root / "src" / "inference" / "predictor.py",
+        config_path,
+    ]
+    missing = [path for path in required_paths if not path.exists()]
+    if missing:
+        raise FileNotFoundError(
+            "Detectron2 delineation project is incomplete. Missing: "
+            + ", ".join(str(path) for path in missing)
+            + ". Pass --detectron2-root or set DETECTRON2_DELINEATE_ROOT."
+        )
+
+    config = load_yaml_config_with_base(config_path)
+    weights = args.detectron2_model_weights or config.get("model", {}).get("model_weights")
+    weights_path = resolve_detectron2_weights_path(root, weights)
+    if not args.skip_delineation and weights_path is not None and not weights_path.exists():
+        raise FileNotFoundError(
+            "Detectron2 model weights were not found: "
+            f"{weights_path}. Pass --detectron2-model-weights /path/to/model_final.pth "
+            "or update model.model_weights in the Detectron2 inference config."
+        )
 
 
 def import_geospatial_stack() -> tuple[Any, Any, Any]:
@@ -1518,6 +1669,82 @@ def write_delineate_configs(
     return pipeline_config_path, batch_config_path, output_root
 
 
+def write_detectron2_configs(
+    *,
+    args: argparse.Namespace,
+    include_tiles: list[str],
+    run_dir: Path,
+) -> tuple[Path, Path, Path]:
+    try:
+        import yaml
+    except ImportError as exc:
+        raise ImportError("Install PyYAML before writing Detectron2 configs.") from exc
+
+    root = resolve_detectron2_root(args)
+    config_dir = run_dir / "05_delineate_configs"
+    config_dir.mkdir(parents=True, exist_ok=True)
+
+    config = load_yaml_config_with_base(resolve_detectron2_config_path(args))
+    config.setdefault("model", {})
+    config.setdefault("data_loader", {})
+    config.setdefault("mask_info", {})
+    config.setdefault("performance", {})
+
+    config["data_loader"]["bands"] = parse_int_csv(args.delineate_bands)
+    config["mask_info"]["range"] = args.mask_range
+    config["mask_info"]["filter_classes"] = parse_int_csv(args.mask_filter_classes)
+    config["mask_info"]["clip_classes"] = parse_int_csv(args.mask_clip_classes)
+
+    weights = args.detectron2_model_weights or config["model"].get("model_weights")
+    weights_path = resolve_detectron2_weights_path(root, weights)
+    if weights_path is not None:
+        config["model"]["model_weights"] = str(weights_path)
+    if args.detectron2_model_config_file:
+        config["model"]["config_file"] = args.detectron2_model_config_file
+    if args.detectron2_score_threshold is not None:
+        config["model"]["score_threshold"] = args.detectron2_score_threshold
+
+    if args.detectron2_num_gpus is not None:
+        config["performance"]["num_gpus"] = args.detectron2_num_gpus
+    else:
+        gpu_ids = parse_csv(args.gpus)
+        if gpu_ids:
+            config["performance"]["num_gpus"] = len(gpu_ids)
+
+    if args.delineate_batch_size > 0:
+        for pass_config in config.get("passes", []):
+            pass_config["batch_size"] = args.delineate_batch_size
+
+    if args.skip_lclu:
+        mask_root = config_dir / "empty_masks_detectron2"
+        mask_root.mkdir(parents=True, exist_ok=True)
+    else:
+        mask_root = root / "data" / "delineation" / "masks"
+    config["mask_root"] = str(mask_root.resolve())
+
+    pipeline_config_path = config_dir / "conf_pipeline_detectron2.yaml"
+    with pipeline_config_path.open("w", encoding="utf-8") as handle:
+        yaml.safe_dump(config, handle, sort_keys=False)
+
+    output_root = args.detectron2_output_root or args.delineate_output_root or (run_dir / "06_delineated_detectron2")
+    temp_root = run_dir / "05_delineate_temp_detectron2"
+    batch_config = {
+        "base_config": str(pipeline_config_path.resolve()),
+        "data_root": str((root / "data" / "delineation" / "images").resolve()),
+        "output_root": str(Path(output_root).expanduser().resolve()),
+        "temp_root": str(temp_root.resolve()),
+        "keep_temp": bool(args.keep_delineate_temp),
+        "mask_root": str(mask_root.resolve()),
+        "include": include_tiles,
+        "exclude": None,
+        "override": None,
+    }
+    batch_config_path = config_dir / "batch_pipeline_detectron2.yaml"
+    with batch_config_path.open("w", encoding="utf-8") as handle:
+        yaml.safe_dump(batch_config, handle, sort_keys=False)
+    return pipeline_config_path, batch_config_path, Path(output_root).expanduser().resolve()
+
+
 def run_delineate(batch_config: Path, args: argparse.Namespace) -> None:
     command = [args.python_executable, "delineate.py", "-b", str(batch_config.resolve())]
     if args.verbose_delineate:
@@ -1543,6 +1770,39 @@ def run_delineate(batch_config: Path, args: argparse.Namespace) -> None:
     return_code = process.wait()
     if return_code != 0:
         raise RuntimeError(f"Delineate-Anything failed with exit code {return_code}.")
+
+
+def run_detectron2_delineate(batch_config: Path, args: argparse.Namespace) -> None:
+    root = resolve_detectron2_root(args)
+    command = [args.python_executable, "scripts/infer.py", "-b", str(batch_config.resolve())]
+    if args.verbose_delineate:
+        command.append("--verbose")
+    env = os.environ.copy()
+    gpu_ids = parse_csv(args.gpus)
+    if gpu_ids:
+        env["CUDA_VISIBLE_DEVICES"] = ",".join(gpu_ids)
+
+    pythonpath_parts = [str(root), str(root / "detectron2")]
+    if env.get("PYTHONPATH"):
+        pythonpath_parts.append(env["PYTHONPATH"])
+    env["PYTHONPATH"] = os.pathsep.join(pythonpath_parts)
+
+    LOGGER.info("Running Detectron2 delineation: %s", " ".join(command))
+    process = subprocess.Popen(
+        command,
+        cwd=root,
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1,
+    )
+    assert process.stdout is not None
+    for line in process.stdout:
+        LOGGER.info("[detectron2] %s", line.rstrip())
+    return_code = process.wait()
+    if return_code != 0:
+        raise RuntimeError(f"Detectron2 delineation failed with exit code {return_code}.")
 
 
 def run_exports(
@@ -1608,6 +1868,26 @@ def stage_tile_for_delineation(
     return {"image": str(staged_sr), "mask": staged_mask_value}
 
 
+def stage_tile_for_detectron2(
+    *,
+    tile_id: str,
+    sr_tif: Path,
+    mask_tif: Path | None,
+    args: argparse.Namespace,
+) -> dict[str, str | None]:
+    root = resolve_detectron2_root(args)
+    image_dir = root / "data" / "delineation" / "images" / tile_id
+    staged_sr = image_dir / "sr.tif"
+    staged_mask = root / "data" / "delineation" / "masks" / f"{tile_id}.tif"
+    copy_or_symlink(sr_tif, staged_sr, args.stage_mode, args.overwrite)
+
+    staged_mask_value = None
+    if mask_tif is not None:
+        copy_or_symlink(mask_tif, staged_mask, args.stage_mode, args.overwrite)
+        staged_mask_value = str(staged_mask)
+    return {"image": str(staged_sr), "mask": staged_mask_value}
+
+
 def save_aoi_copy(aoi: Any, output_path: Path) -> None:
     output_path.parent.mkdir(parents=True, exist_ok=True)
     aoi.to_crs("EPSG:4326").to_file(output_path, driver="GeoJSON")
@@ -1649,12 +1929,14 @@ def main() -> None:
 
     with timed_step(summary, run_dir, "preflight"):
         ensure_repositories(args.clone_missing, required_component_repositories(args))
-        check_python_environment(args)
         check_delineate_instance_raster_support(args)
+        check_detectron2_delineation_support(args)
+        check_python_environment(args)
         if args.basemap_auto_skipped_super_resolution:
             LOGGER.info("Basemap input is already high-resolution imagery; OpenSR is skipped unless --basemap-run-super-resolution is set.")
         LOGGER.info("Pipeline root: %s", PIPELINE_ROOT)
         LOGGER.info("Run directory: %s", run_dir)
+        LOGGER.info("Delineation backend: %s", args.delineation_backend)
 
     with timed_step(summary, run_dir, "aoi_and_tile_discovery"):
         aoi = load_aoi(args.aoi)
@@ -1744,13 +2026,21 @@ def main() -> None:
                 output_sr=run_dir / "04_super_resolution" / tile_id / "sr.tif",
             )
 
-        with timed_step(summary, run_dir, f"stage_delineate_{tile_id}"):
-            staged = stage_tile_for_delineation(
-                tile_id=tile_id,
-                sr_tif=sr_path,
-                mask_tif=mask_path,
-                args=args,
-            )
+        with timed_step(summary, run_dir, f"stage_delineation_{tile_id}"):
+            if args.delineation_backend == "detectron2":
+                staged = stage_tile_for_detectron2(
+                    tile_id=tile_id,
+                    sr_tif=sr_path,
+                    mask_tif=mask_path,
+                    args=args,
+                )
+            else:
+                staged = stage_tile_for_delineation(
+                    tile_id=tile_id,
+                    sr_tif=sr_path,
+                    mask_tif=mask_path,
+                    args=args,
+                )
             staged_tiles.append(tile_id)
             staged_manifest[tile_id] = {
                 "mosaic": str(mosaic_path),
@@ -1762,20 +2052,31 @@ def main() -> None:
             dump_json(run_dir / "manifests" / "staged_inputs.json", staged_manifest)
 
     with timed_step(summary, run_dir, "write_delineate_configs"):
-        _, batch_config, delineate_output_root = write_delineate_configs(
-            args=args,
-            include_tiles=staged_tiles,
-            run_dir=run_dir,
-        )
+        if args.delineation_backend == "detectron2":
+            _, batch_config, delineate_output_root = write_detectron2_configs(
+                args=args,
+                include_tiles=staged_tiles,
+                run_dir=run_dir,
+            )
+        else:
+            _, batch_config, delineate_output_root = write_delineate_configs(
+                args=args,
+                include_tiles=staged_tiles,
+                run_dir=run_dir,
+            )
+        summary["delineation_backend"] = args.delineation_backend
         summary["delineate_batch_config"] = str(batch_config)
         summary["delineate_output_root"] = str(delineate_output_root)
         write_summary(run_dir, summary)
 
     if args.skip_delineation:
-        LOGGER.info("Skipping Delineate-Anything execution. Inputs and configs are ready.")
+        LOGGER.info("Skipping delineation execution. Inputs and configs are ready.")
     else:
         with timed_step(summary, run_dir, "delineation"):
-            run_delineate(batch_config, args)
+            if args.delineation_backend == "detectron2":
+                run_detectron2_delineate(batch_config, args)
+            else:
+                run_delineate(batch_config, args)
 
     if args.skip_exports:
         LOGGER.info("Skipping result exports.")
