@@ -1,0 +1,65 @@
+# ── Python ───────────────────────────────────────────────────
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# ── IDE ──────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# ── OS ───────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+
+# ── Data (user-provided, not tracked) ────────────────────────
+# Training data
+data/training/images/
+data/training/labels/
+data/training/annotations/*.json
+
+# Delineation data
+data/delineation/images/
+data/delineation/masks/
+data/delineation/delineated/
+data/delineation/temp/
+
+# Legacy data dirs (keep for compat)
+data/raw/
+data/processed/
+data/output/
+
+# Keep gitkeep and README
+!data/**/.gitkeep
+!data/**/README.md
+
+# Model weights
+*.pth
+*.pt
+!requirements*.txt
+
+# ── Training outputs ────────────────────────────────────────
+output_detectron2/
+farm_fields_seg/
+mlruns/
+runs/
+wandb/
+lightning_logs/
+
+# ── Generated / machine-specific ────────────────────────────
+data_train.yaml
+*.log
+docs/*.pptx
+docs/~$*
+docs/calisthenics_speech.md
+docs/presentation*.md
+
+# ── Environment ─────────────────────────────────────────────
+.env
+.venv/
+*.conda/

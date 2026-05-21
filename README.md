@@ -14,7 +14,7 @@ The main entrypoint is [pipeline.py](/Users/houcine/Desktop/from_oci/field_delin
 
 ## Component Repos After Cloning
 
-`S2Mosaic`, `opensr-model`, and `Delineate-Anything` are separate Git repositories. A parent Git repository will not automatically copy their contents unless you either clone submodules or let the pipeline clone them.
+`S2Mosaic`, `opensr-model`, and `Delineate-Anything` are separate Git repositories. A parent Git repository will not automatically copy their contents unless you either clone submodules or let the pipeline clone them. `Delineate-Detectron2` is vendored in this branch as a second delineation backend.
 
 If they were added as Git submodules, clone with:
 
@@ -346,12 +346,11 @@ The pipeline defaults to `--delineate-bands 1,2,3` because the staged `sr.tif` f
 
 ## Detectron2 Backend
 
-This branch can run the Detectron2 delineation project instead of the original `Delineate-Anything` CLI:
+This branch vendors the Detectron2 delineation project under `Delineate-Detectron2`, so it can run the Detectron2 model instead of the original `Delineate-Anything` CLI:
 
 ```bash
 python pipeline.py \
   --delineation-backend detectron2 \
-  --detectron2-root /path/to/roboflow_data_explore \
   --detectron2-model-weights /path/to/model_final.pth \
   --aoi /path/to/aoi.geojson \
   --start-date 2025-07-01 \
@@ -360,7 +359,7 @@ python pipeline.py \
   --resume
 ```
 
-If `--detectron2-root` is omitted, the pipeline checks `DETECTRON2_DELINEATE_ROOT`, then common sibling folders such as `Delineate-Anything_just_folders_keeper/roboflow_data_explore`. Detectron2 outputs default to `06_delineated_detectron2`; pass `--detectron2-output-root` or the existing `--delineate-output-root` to choose a different folder.
+If `--detectron2-root` is omitted, the pipeline checks `DETECTRON2_DELINEATE_ROOT`, then the vendored `Delineate-Detectron2` folder, then legacy sibling folders such as `Delineate-Anything_just_folders_keeper/roboflow_data_explore`. Detectron2 outputs default to `06_delineated_detectron2`; pass `--detectron2-output-root` or the existing `--delineate-output-root` to choose a different folder.
 
 The Detectron2 project uses `scripts/infer.py -b` and `configs/inference.yaml`, so it is not a literal drop-in replacement for `Delineate-Anything/delineate.py`. The pipeline generates matching Detectron2 config files under `05_delineate_configs/`.
 

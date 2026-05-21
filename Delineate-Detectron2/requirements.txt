@@ -1,0 +1,29 @@
+numpy<2
+torch>=2.0.0
+Pillow
+matplotlib
+PyYAML
+pandas
+tqdm
+
+# Pipeline — geospatial
+GDAL
+rasterio
+shapely>=2.0
+pyproj
+affine
+scipy
+opencv-python
+
+# Detectron2 (Apache 2.0) — install via:
+#   pip install 'git+https://github.com/facebookresearch/detectron2.git'
+# or for specific torch/cuda version see:
+#   https://detectron2.readthedocs.io/en/latest/tutorials/install.html
+detectron2
+
+# Experiment tracking (optional)
+mlflow>=2.10.0
+tensorboard
+
+# YOLO (AGPL — only needed for finetune_yolo_seg.ipynb)
+# ultralytics>=8.4.0

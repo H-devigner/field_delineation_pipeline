@@ -1,0 +1,71 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "field-delineation"
+version = "1.0.0"
+description = "Production-scale agricultural field boundary detection from satellite imagery"
+readme = "README.md"
+license = {text = "Apache-2.0"}
+requires-python = ">=3.9"
+
+dependencies = [
+    # Core
+    "numpy<2",
+    "torch>=2.0.0",
+    "Pillow",
+    "PyYAML",
+    "tqdm",
+    # Geospatial
+    "GDAL",
+    "rasterio",
+    "shapely>=2.0",
+    "pyproj",
+    "affine",
+    # ML inference
+    "detectron2",
+    # Processing
+    "scipy",
+    "opencv-python",
+    # Monitoring
+    "prometheus-client>=0.20",
+    "python-json-logger>=2.0",
+    "psutil",
+]
+
+[project.optional-dependencies]
+train = [
+    "matplotlib",
+    "pandas",
+    "mlflow>=2.10.0",
+    "tensorboard",
+    "albumentations",
+    "pycocotools",
+]
+dev = [
+    "pytest>=7.0",
+    "pytest-cov",
+    "ruff",
+    "mypy",
+    "pre-commit",
+]
+
+[project.scripts]
+field-train = "scripts.train:main"
+field-infer = "scripts.infer:main"
+field-eval = "scripts.evaluate:main"
+
+[tool.setuptools.packages.find]
+include = ["src*"]
+
+[tool.ruff]
+target-version = "py39"
+line-length = 120
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-v --tb=short"

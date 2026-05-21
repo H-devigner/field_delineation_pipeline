@@ -37,6 +37,7 @@ PIPELINE_ROOT = Path(__file__).resolve().parent
 S2MOSAIC_ROOT = PIPELINE_ROOT / "S2Mosaic"
 OPENSR_ROOT = PIPELINE_ROOT / "opensr-model"
 DELINEATE_ROOT = PIPELINE_ROOT / "Delineate-Anything"
+DETECTRON2_DELINEATE_ROOT = PIPELINE_ROOT / "Delineate-Detectron2"
 DEFAULT_TILE_GRID = S2MOSAIC_ROOT / "s2mosaic" / "sentinel_2_index.gpkg"
 
 
@@ -46,8 +47,8 @@ def default_detectron2_root() -> Path:
         return Path(env_root).expanduser()
 
     candidates = [
+        DETECTRON2_DELINEATE_ROOT,
         PIPELINE_ROOT / "roboflow_data_explore",
-        PIPELINE_ROOT / "Delineate-Detectron2",
         PIPELINE_ROOT.parent / "Delineate-Anything_just_folders_keeper" / "roboflow_data_explore",
     ]
     for candidate in candidates:

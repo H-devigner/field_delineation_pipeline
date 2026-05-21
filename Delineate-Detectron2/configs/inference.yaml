@@ -1,0 +1,80 @@
+# ── Inference Config — Optimized for 8× H100 80GB ───────────
+base_config: configs/base.yaml
+
+model:
+  config_file: "COCO-InstanceSegmentation/mask_rcnn_R_101_FPN_3x.yaml"
+  model_weights: "output_detectron2/model_final.pth"
+  num_classes: 1
+  score_threshold: 0.3
+  use_half: true               # FP16 on H100 (~2× throughput)
+
+execution_planner:
+  region_width: 16384
+  region_height: 16384
+  pixel_offset: [0, 0]
+
+passes:
+  - batch_size: 64
+    tile_size: null
+    tile_step: 0.5
+    delineation_config:
+      pixel_area_threshold: 512
+      remaining_area_threshold: 0.8
+      compose_merge_iou: 0.8
+      merge_iou: 0.8
+      merge_edge_iou: 0.2
+      merge_edge_pixels: 32
+      merge_relative_area_threshold: 0.5
+      merge_asymetric_pixel_area_threshold: 64
+      merge_asymetric_relative_area_threshold: 0.5
+      merging_edge_width: 4
+
+polygonization:
+  layer_name: fields
+  override_if_exists: true
+
+filtering:
+  minimum_area_m2: 2500
+  minimum_part_area_m2: 0
+  minimum_hole_area_m2: 2500
+  minimum_background_field_area_m2: 50000
+  minimum_background_field_hole_area_m2: 25000
+  middleground_offset: null
+  minimum_middleground_field_area_m2: 10000
+  minimum_middleground_field_hole_area_m2: 5000
+
+simplification:
+  simplify: false
+  tolerance: 1.0
+
+# ── LCLU (Land Cover Land Use) ───────────────────────────────
+# Auto-discovery: Place masks in data/delineation/masks/<folder_name>.tif
+mask_root: data/delineation/masks
+mask_filepath: null
+
+# 9-class land cover (0=Water,1=Trees,2=Grass,3=Flooded,4=Crops,5=Shrub,6=Built,7=Bare,8=Snow)
+mask_info:
+  range: 9
+  clip_classes: [0, 6, 8]
+  filter_classes: [0, 1, 6, 8]
+
+background_info:
+  background_classes_from_mask: [1, 2, 3, 5, 7]
+  additional_source: null
+
+# ── Performance — H100 System Tuning ─────────────────────────
+performance:
+  num_gpus: 8
+  compile_model: false
+  pin_memory: true
+  num_postproc_workers: 16
+  num_polygonize_workers: 16
+  prefetch_regions: 2
+  gdal_cache_mb: 4096
+
+# ── Monitoring ───────────────────────────────────────────────
+monitoring:
+  enable_metrics: true
+  prometheus_pushgateway: null
+  log_format: "json"
+  log_level: "INFO"

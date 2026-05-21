@@ -1,0 +1,21 @@
+# ── Batch Config ─────────────────────────────────────────────
+base_config: configs/inference.yaml
+
+# Data layout: data/delineation/{images,masks,delineated,temp}
+data_root: data/delineation/images
+output_root: data/delineation/delineated
+temp_root: data/delineation/temp
+keep_temp: false
+
+# LCLU masks auto-discovery: <mask_root>/<folder_name>.tif
+mask_root: data/delineation/masks
+
+# null = process all subfolders
+include: null
+exclude: null
+
+# Per-entry overrides
+# override:
+#   - entry: Region_A
+#     mask: data/delineation/masks/custom.tif
+override: null

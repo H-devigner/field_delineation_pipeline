@@ -1,0 +1,50 @@
+# ── Training Config ──────────────────────────────────────────
+base_config: configs/base.yaml
+
+model:
+  config_file: "COCO-InstanceSegmentation/mask_rcnn_R_101_FPN_3x.yaml"
+  pretrained_weights: "COCO-InstanceSegmentation/mask_rcnn_R_101_FPN_3x.yaml"
+  num_classes: 1
+
+training:
+  max_iter: 3000
+  base_lr: 0.00025
+  batch_size: 2
+  num_workers: 2
+  checkpoint_period: 500
+  eval_period: 500
+
+  # Learning rate schedule
+  lr_scheduler: "WarmupMultiStepLR"
+  warmup_iters: 100
+  lr_decay_steps: [2000, 2500]
+  lr_decay_factor: 0.1
+
+  # Augmentation
+  augmentation:
+    horizontal_flip: true
+    resize_shortest_edge: [640, 672, 704, 736, 768, 800]
+
+dataset:
+  name: "field_boundaries"
+  class_name: "field"
+
+  # YOLO source (from Roboflow) — will be auto-converted to COCO JSON
+  yolo_root: "data/training/Farm Fields.v1i.yolov8"
+
+  # COCO JSONs (auto-generated from YOLO if missing)
+  train_json: "data/training/annotations/train.json"
+  val_json: "data/training/annotations/val.json"
+
+  # Image directories (relative to yolo_root)
+  images_root: "data/training/Farm Fields.v1i.yolov8"
+
+output_dir: "output_detectron2"
+
+# ── Experiment tracking ──────────────────────────────────────
+tracking:
+  backend: "mlflow"           # mlflow | tensorboard | none
+  experiment_name: "field-delineation"
+  # mlflow_uri: "http://localhost:5000"
+  log_every_n_iter: 50
+  save_model_artifact: true

@@ -1,0 +1,19 @@
+# ── Shared defaults ──────────────────────────────────────────
+# These values are inherited by train.yaml and inference.yaml
+
+data_loader:
+  bands: [1, 2, 3]           # RGB (GDAL 1-based)
+  nodata_value: [0, 0, 0]
+  min: null                   # auto-computed via percentiles
+  max: null
+
+filtering:
+  minimum_area_m2: 2500
+  minimum_hole_area_m2: 2500
+  minimum_part_area_m2: 0
+
+output:
+  format: "both"              # gpkg | geojson | both
+  geojson_reproject: true     # reproject to WGS84
+
+super_resolution: null        # null = auto
