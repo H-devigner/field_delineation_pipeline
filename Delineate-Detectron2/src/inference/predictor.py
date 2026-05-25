@@ -10,7 +10,9 @@ Key optimizations:
 """
 
 import logging
+import tempfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from pathlib import Path
 from typing import Dict, List
 
 import numpy as np
@@ -53,7 +55,7 @@ class Detectron2Predictor:
             "config_file",
             "COCO-InstanceSegmentation/mask_rcnn_R_101_FPN_3x.yaml",
         )
-        weights_path = str(model_config["model_weights"])
+        weights_path = self._prepare_weights(str(model_config["model_weights"]))
         score_thresh = model_config.get("score_threshold", 0.3)
         num_classes = model_config.get("num_classes", 1)
 
@@ -169,6 +171,93 @@ class Detectron2Predictor:
     def shutdown(self):
         """Clean up thread pool."""
         self._executor.shutdown(wait=False)
+
+    @staticmethod
+    def _prepare_weights(weights_path: str) -> str:
+        """Normalize common PyTorch checkpoint shapes for Detectron2's checkpointer."""
+        path = Path(weights_path)
+        if not path.exists():
+            return weights_path
+
+        local_cache = path.with_name(f"{path.stem}.detectron2{path.suffix}")
+        if local_cache.exists() and local_cache.stat().st_mtime >= path.stat().st_mtime:
+            logger.info(f"Using adapted Detectron2 checkpoint: {local_cache}")
+            return str(local_cache)
+
+        try:
+            checkpoint = torch.load(str(path), map_location="cpu", weights_only=False)
+        except TypeError:
+            checkpoint = torch.load(str(path), map_location="cpu")
+
+        state_dict = Detectron2Predictor._extract_state_dict(checkpoint)
+        if state_dict is None:
+            return weights_path
+
+        if isinstance(checkpoint, dict) and checkpoint.get("model") is state_dict:
+            return weights_path
+
+        adapted = {"model": state_dict}
+        try:
+            torch.save(adapted, str(local_cache))
+            logger.info(f"Adapted checkpoint for Detectron2 loader: {local_cache}")
+            return str(local_cache)
+        except OSError:
+            cache_dir = Path(tempfile.gettempdir()) / "delineate_detectron2_checkpoints"
+            cache_dir.mkdir(parents=True, exist_ok=True)
+            fallback_cache = cache_dir / f"{path.stem}.detectron2{path.suffix}"
+            torch.save(adapted, str(fallback_cache))
+            logger.info(f"Adapted checkpoint for Detectron2 loader: {fallback_cache}")
+            return str(fallback_cache)
+
+    @staticmethod
+    def _extract_state_dict(checkpoint):
+        if not isinstance(checkpoint, dict):
+            return None
+
+        candidate_keys = (
+            "model",
+            "model_state_dict",
+            "state_dict",
+            "net",
+            "network",
+            "module",
+            "ema",
+            "state_dict_ema",
+        )
+        for key in candidate_keys:
+            value = checkpoint.get(key)
+            if Detectron2Predictor._looks_like_state_dict(value):
+                return Detectron2Predictor._strip_state_dict_prefixes(value)
+
+        tensor_items = {
+            key: value
+            for key, value in checkpoint.items()
+            if isinstance(key, str) and Detectron2Predictor._is_state_value(value)
+        }
+        if tensor_items:
+            return Detectron2Predictor._strip_state_dict_prefixes(tensor_items)
+
+        return None
+
+    @staticmethod
+    def _looks_like_state_dict(value) -> bool:
+        if not isinstance(value, dict) or not value:
+            return False
+        return all(isinstance(key, str) for key in value) and any(
+            Detectron2Predictor._is_state_value(item) for item in value.values()
+        )
+
+    @staticmethod
+    def _is_state_value(value) -> bool:
+        return isinstance(value, (torch.Tensor, np.ndarray))
+
+    @staticmethod
+    def _strip_state_dict_prefixes(state_dict: dict) -> dict:
+        keys = list(state_dict)
+        for prefix in ("module.", "model.", "net.", "network."):
+            if keys and all(key.startswith(prefix) for key in keys):
+                return {key[len(prefix):]: value for key, value in state_dict.items()}
+        return state_dict
 
     @staticmethod
     def _build_cfg(config_file, weights_path, score_thresh, num_classes, device):
