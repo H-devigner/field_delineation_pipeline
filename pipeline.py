@@ -102,6 +102,30 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--clone-missing", action="store_true", help="Clone missing component repos into this folder.")
     parser.add_argument("--overwrite", action="store_true", help="Overwrite existing intermediate outputs.")
     parser.add_argument("--resume", action="store_true", help="Reuse existing intermediates when possible.")
+    parser.add_argument(
+        "--reuse-upstream-from",
+        default=None,
+        help=(
+            "Reuse upstream artifacts from an existing run name/path, or 'auto' to scan --output-root "
+            "for a run with matching AOI and date range. Reused stages are controlled by --reuse-upstream-stages."
+        ),
+    )
+    parser.add_argument(
+        "--reuse-upstream-stages",
+        default="mosaic,clip,lclu,super_resolution",
+        help="Comma-separated upstream stages to reuse: mosaic,clip,lclu,super_resolution, or all.",
+    )
+    parser.add_argument(
+        "--reuse-upstream-ignore-date",
+        action="store_true",
+        help="Allow upstream reuse even when the source run's recorded start/end dates do not match.",
+    )
+    parser.add_argument(
+        "--reuse-upstream-aoi-tolerance",
+        default=1e-9,
+        type=float,
+        help="AOI symmetric-difference area tolerance in EPSG:4326 degrees for upstream run matching.",
+    )
     parser.add_argument("--tiles-only", action="store_true", help="Stop after AOI/tile intersection manifests are written.")
 
     basemap = parser.add_argument_group("XYZ basemap tiles")
@@ -274,6 +298,22 @@ def parse_gpus(value: str) -> int | list[int]:
     if len(parts) == 1:
         return parts[0]
     return parts
+
+
+def parse_reuse_upstream_stages(value: str | None) -> set[str]:
+    valid = {"mosaic", "clip", "lclu", "super_resolution"}
+    aliases = {"sr": "super_resolution", "super-resolution": "super_resolution"}
+    items = parse_csv(value)
+    if not items or any(item.lower() == "all" for item in items):
+        return set(valid)
+
+    stages: set[str] = set()
+    for item in items:
+        stage = aliases.get(item.lower(), item.lower())
+        if stage not in valid:
+            raise ValueError(f"Unknown --reuse-upstream-stages item '{item}'. Valid values: {sorted(valid)} or all.")
+        stages.add(stage)
+    return stages
 
 
 def dump_json(path: Path, payload: dict[str, Any]) -> None:
@@ -688,6 +728,168 @@ def union_geometry(gdf: Any) -> Any:
     if hasattr(gdf.geometry, "union_all"):
         return gdf.geometry.union_all()
     return gdf.geometry.unary_union
+
+
+def normalized_aoi_geometry(aoi: Any) -> Any:
+    geometry = union_geometry(aoi.to_crs("EPSG:4326"))
+    if not geometry.is_valid:
+        geometry = make_valid_geometry(geometry)
+    return geometry
+
+
+def geometries_match(left: Any, right: Any, tolerance: float) -> bool:
+    if left.equals(right):
+        return True
+    try:
+        return left.symmetric_difference(right).area <= tolerance
+    except Exception:
+        return False
+
+
+def recorded_run_dates(run_dir: Path) -> tuple[str | None, str | None]:
+    args_path = run_dir / "manifests" / "args.json"
+    try:
+        with args_path.open("r", encoding="utf-8") as handle:
+            args = json.load(handle)
+    except FileNotFoundError:
+        return None, None
+    except json.JSONDecodeError:
+        LOGGER.warning("Could not parse run args for upstream reuse: %s", args_path)
+        return None, None
+    return args.get("start_date"), args.get("end_date")
+
+
+def validate_upstream_run(
+    *,
+    source_run_dir: Path,
+    current_aoi_geometry: Any,
+    start_date: dt.date,
+    end_date: dt.date,
+    args: argparse.Namespace,
+    strict: bool,
+) -> bool:
+    source_aoi_path = source_run_dir / "00_aoi" / "aoi.geojson"
+    if not source_aoi_path.exists():
+        message = f"Upstream run has no AOI copy: {source_aoi_path}"
+        if strict:
+            raise FileNotFoundError(message)
+        LOGGER.debug(message)
+        return False
+
+    source_aoi = load_aoi(source_aoi_path)
+    source_geometry = normalized_aoi_geometry(source_aoi)
+    if not geometries_match(current_aoi_geometry, source_geometry, args.reuse_upstream_aoi_tolerance):
+        message = f"Upstream run AOI does not match current AOI: {source_run_dir}"
+        if strict:
+            raise ValueError(message)
+        LOGGER.debug(message)
+        return False
+
+    if not args.reuse_upstream_ignore_date:
+        recorded_start, recorded_end = recorded_run_dates(source_run_dir)
+        expected_start = start_date.isoformat()
+        expected_end = end_date.isoformat()
+        if recorded_start != expected_start or recorded_end != expected_end:
+            message = (
+                f"Upstream run dates do not match current run: {source_run_dir} "
+                f"(recorded {recorded_start} to {recorded_end}, expected {expected_start} to {expected_end}). "
+                "Use --reuse-upstream-ignore-date to override."
+            )
+            if strict:
+                raise ValueError(message)
+            LOGGER.debug(message)
+            return False
+
+    return True
+
+
+def resolve_reuse_upstream_dir(
+    *,
+    args: argparse.Namespace,
+    run_dir: Path,
+    current_aoi_geometry: Any,
+    start_date: dt.date,
+    end_date: dt.date,
+) -> Path | None:
+    reuse_value = args.reuse_upstream_from
+    if not reuse_value:
+        return None
+
+    output_root = Path(args.output_root).expanduser().resolve()
+    if reuse_value.lower() != "auto":
+        candidate = Path(reuse_value).expanduser()
+        if not candidate.is_absolute():
+            candidate = output_root / candidate
+        candidate = candidate.resolve()
+        if candidate == run_dir:
+            raise ValueError("--reuse-upstream-from cannot point at the current run directory.")
+        if not candidate.exists():
+            raise FileNotFoundError(f"Upstream reuse run does not exist: {candidate}")
+        validate_upstream_run(
+            source_run_dir=candidate,
+            current_aoi_geometry=current_aoi_geometry,
+            start_date=start_date,
+            end_date=end_date,
+            args=args,
+            strict=True,
+        )
+        return candidate
+
+    candidates = []
+    if output_root.exists():
+        for candidate in output_root.iterdir():
+            if not candidate.is_dir() or candidate.resolve() == run_dir:
+                continue
+            if validate_upstream_run(
+                source_run_dir=candidate,
+                current_aoi_geometry=current_aoi_geometry,
+                start_date=start_date,
+                end_date=end_date,
+                args=args,
+                strict=False,
+            ):
+                candidates.append(candidate.resolve())
+
+    if not candidates:
+        LOGGER.info("No matching upstream run found for --reuse-upstream-from auto.")
+        return None
+
+    candidates.sort(key=lambda path: path.stat().st_mtime, reverse=True)
+    return candidates[0]
+
+
+def find_reusable_upstream_artifact(
+    *,
+    source_run_dir: Path | None,
+    stage: str,
+    tile_id: str,
+    args: argparse.Namespace,
+) -> Path | None:
+    if source_run_dir is None:
+        return None
+    stages = parse_reuse_upstream_stages(args.reuse_upstream_stages)
+    if stage not in stages:
+        return None
+
+    if stage == "mosaic":
+        if args.input_mode == "sentinel2":
+            mosaic_dir = source_run_dir / "01_mosaics" / tile_id
+            preferred = mosaic_dir / "mosaic.tif"
+            if preferred.exists():
+                return preferred
+            candidates = sorted(mosaic_dir.glob("*.tif"))
+            return candidates[0] if candidates else None
+        candidate = source_run_dir / "01_basemap_geotiff" / f"{tile_id}.tif"
+    elif stage == "clip":
+        candidate = source_run_dir / "02_clipped_mosaics" / f"{tile_id}.tif"
+    elif stage == "lclu":
+        candidate = source_run_dir / "03_lclu_masks" / f"{tile_id}.tif"
+    elif stage == "super_resolution":
+        candidate = source_run_dir / "04_super_resolution" / tile_id / "sr.tif"
+    else:
+        raise ValueError(f"Unsupported upstream reuse stage: {stage}")
+
+    return candidate if candidate.exists() else None
 
 
 def force_2d_geometry(geometry: Any) -> Any:
@@ -1967,11 +2169,29 @@ def main() -> None:
         LOGGER.info("Tiles-only run complete. Intersections: %s", run_dir / "manifests" / "intersecting_tiles.geojson")
         return
 
+    current_aoi_geometry = normalized_aoi_geometry(aoi)
+    reuse_upstream_dir = resolve_reuse_upstream_dir(
+        args=args,
+        run_dir=run_dir,
+        current_aoi_geometry=current_aoi_geometry,
+        start_date=start_date,
+        end_date=end_date,
+    )
+    if reuse_upstream_dir is not None:
+        reuse_stages = sorted(parse_reuse_upstream_stages(args.reuse_upstream_stages))
+        summary["reuse_upstream"] = {
+            "source_run_dir": str(reuse_upstream_dir),
+            "stages": reuse_stages,
+            "ignore_date": bool(args.reuse_upstream_ignore_date),
+        }
+        write_summary(run_dir, summary)
+        LOGGER.info("Reusing upstream artifacts from %s for stages: %s", reuse_upstream_dir, ", ".join(reuse_stages))
+
     staged_tiles: list[str] = []
     staged_manifest: dict[str, Any] = {}
     opensr_runner = OpenSRRunner(args)
     aoi_wgs84 = aoi.to_crs("EPSG:4326")
-    aoi_geom_wgs84 = union_geometry(aoi_wgs84)
+    aoi_geom_wgs84 = current_aoi_geometry
 
     for _, tile in tiles.to_crs("EPSG:4326").iterrows():
         tile_id = str(tile["tile_id"])
@@ -1981,7 +2201,16 @@ def main() -> None:
             lclu_geom_wgs84 = aoi_geom_wgs84
 
         with timed_step(summary, run_dir, f"mosaic_{tile_id}"):
-            if args.input_mode == "sentinel2":
+            reused_mosaic = find_reusable_upstream_artifact(
+                source_run_dir=reuse_upstream_dir,
+                stage="mosaic",
+                tile_id=tile_id,
+                args=args,
+            )
+            if reused_mosaic is not None:
+                LOGGER.info("Reusing upstream mosaic for %s: %s", tile_id, reused_mosaic)
+                mosaic_path = reused_mosaic
+            elif args.input_mode == "sentinel2":
                 mosaic_path = run_mosaic(
                     tile_id=tile_id,
                     start_date=start_date,
@@ -1998,7 +2227,16 @@ def main() -> None:
                 )
 
         with timed_step(summary, run_dir, f"clip_{tile_id}"):
-            if args.clip_to_aoi:
+            reused_clip = find_reusable_upstream_artifact(
+                source_run_dir=reuse_upstream_dir,
+                stage="clip",
+                tile_id=tile_id,
+                args=args,
+            )
+            if reused_clip is not None and args.clip_to_aoi:
+                LOGGER.info("Reusing upstream clipped mosaic for %s: %s", tile_id, reused_clip)
+                model_input_path = reused_clip
+            elif args.clip_to_aoi:
                 model_input_path = clip_raster_to_aoi(
                     input_tif=mosaic_path,
                     output_tif=run_dir / "02_clipped_mosaics" / f"{tile_id}.tif",
@@ -2013,19 +2251,39 @@ def main() -> None:
             if args.skip_lclu:
                 LOGGER.info("Skipping LCLU mask for %s", tile_id)
             else:
-                mask_path = download_dynamic_world_mask(
-                    geometry_wgs84=lclu_geom_wgs84,
-                    output_tif=run_dir / "03_lclu_masks" / f"{tile_id}.tif",
-                    start_date=start_date,
-                    end_date=end_date,
+                reused_mask = find_reusable_upstream_artifact(
+                    source_run_dir=reuse_upstream_dir,
+                    stage="lclu",
+                    tile_id=tile_id,
                     args=args,
                 )
+                if reused_mask is not None:
+                    LOGGER.info("Reusing upstream LCLU mask for %s: %s", tile_id, reused_mask)
+                    mask_path = reused_mask
+                else:
+                    mask_path = download_dynamic_world_mask(
+                        geometry_wgs84=lclu_geom_wgs84,
+                        output_tif=run_dir / "03_lclu_masks" / f"{tile_id}.tif",
+                        start_date=start_date,
+                        end_date=end_date,
+                        args=args,
+                    )
 
         with timed_step(summary, run_dir, f"super_resolution_{tile_id}"):
-            sr_path = opensr_runner.run(
-                input_tif=model_input_path,
-                output_sr=run_dir / "04_super_resolution" / tile_id / "sr.tif",
+            reused_sr = find_reusable_upstream_artifact(
+                source_run_dir=reuse_upstream_dir,
+                stage="super_resolution",
+                tile_id=tile_id,
+                args=args,
             )
+            if reused_sr is not None:
+                LOGGER.info("Reusing upstream SR output for %s: %s", tile_id, reused_sr)
+                sr_path = reused_sr
+            else:
+                sr_path = opensr_runner.run(
+                    input_tif=model_input_path,
+                    output_sr=run_dir / "04_super_resolution" / tile_id / "sr.tif",
+                )
 
         with timed_step(summary, run_dir, f"stage_delineation_{tile_id}"):
             if args.delineation_backend == "detectron2":

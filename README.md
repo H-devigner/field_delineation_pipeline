@@ -363,6 +363,27 @@ If `--detectron2-root` is omitted, the pipeline checks `DETECTRON2_DELINEATE_ROO
 
 The Detectron2 project uses `scripts/infer.py -b` and `configs/inference.yaml`, so it is not a literal drop-in replacement for `Delineate-Anything/delineate.py`. The pipeline generates matching Detectron2 config files under `05_delineate_configs/`.
 
+## Reusing Upstream Runs
+
+When comparing delineation backends on the same AOI/date range, reuse the expensive upstream products from an older run:
+
+```bash
+python pipeline.py \
+  --delineation-backend detectron2 \
+  --detectron2-model-weights /path/to/model_final.pth \
+  --reuse-upstream-from rwanda_2026 \
+  --aoi /path/to/rw.geojson \
+  --start-date 2026-01-01 \
+  --end-date 2026-05-24 \
+  --run-name rwanda_2026_detectron2 \
+  --output-root "$RUNS" \
+  --resume
+```
+
+`--reuse-upstream-from` accepts a run name under `--output-root`, an absolute path, or `auto`. The pipeline validates the saved upstream AOI and recorded start/end dates before reuse. Pass `--reuse-upstream-ignore-date` only when you intentionally want to reuse products from a run with different recorded dates.
+
+By default it reuses `mosaic,clip,lclu,super_resolution`. Narrow that with `--reuse-upstream-stages`, for example `--reuse-upstream-stages lclu,super_resolution`.
+
 Use `--save-instance-rasters` with the `delineate-anything` backend when you want to preserve Delineate-Anything's postprocessed instance-ID raster before polygonization. Positive values are field instance IDs, negative values are background IDs, and `0` is nodata/background. These rasters are intended for later cross-tile seam merging. The Detectron2 backend currently writes GPKGs/GeoJSON but does not expose that old instance-raster hook.
 
 Standalone instance-raster postprocessing:
