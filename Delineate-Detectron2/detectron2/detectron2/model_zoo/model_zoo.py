@@ -140,6 +140,14 @@ def get_config_file(config_path):
         "detectron2.model_zoo", os.path.join("configs", config_path)
     )
     if not os.path.exists(cfg_file):
+        source_tree_cfg_file = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+            "configs",
+            config_path,
+        )
+        if os.path.exists(source_tree_cfg_file):
+            return source_tree_cfg_file
+    if not os.path.exists(cfg_file):
         raise RuntimeError("{} not available in Model Zoo!".format(config_path))
     return cfg_file
 
