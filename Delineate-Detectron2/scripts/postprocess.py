@@ -48,6 +48,26 @@ ogr.UseExceptions()
 gdal.UseExceptions()
 
 
+def compact_layer(ds, layer_name):
+    """Best-effort GeoPackage compaction; never fail postprocessing for cleanup."""
+    commands = [
+        (f"REPACK {layer_name}", "OGRSQL"),
+        ("VACUUM", "SQLITE"),
+    ]
+    errors = []
+
+    for sql, dialect in commands:
+        try:
+            result = ds.ExecuteSQL(sql, None, dialect)
+            if result is not None:
+                ds.ReleaseResultSet(result)
+            return
+        except RuntimeError as exc:
+            errors.append(f"{sql} ({dialect}): {exc}")
+
+    logger.warning("Skipping compaction; unsupported by this GDAL/driver combination: %s", "; ".join(errors))
+
+
 # ═══════════════════════════════════════════════════════════════
 # Core operations
 # ═══════════════════════════════════════════════════════════════
@@ -224,8 +244,7 @@ def dissolve_overlaps(gpkg_path, layer_name="fields", iou_threshold=0.3):
         layer.DeleteFeature(fid)
     layer.CommitTransaction()
 
-    # Compact (repack) to reclaim space
-    ds.ExecuteSQL(f"REPACK {layer_name}")
+    compact_layer(ds, layer_name)
 
     # Write merged geometries
     layer.StartTransaction()
@@ -340,7 +359,7 @@ def filter_by_area(gpkg_path, layer_name="fields",
         layer.SetFeature(feat)
     layer.CommitTransaction()
 
-    ds.ExecuteSQL(f"REPACK {layer_name}")
+    compact_layer(ds, layer_name)
     remaining = layer.GetFeatureCount()
     ds = None
     logger.info(f"  Removed {len(to_delete)}, updated {len(to_update)}, remaining: {remaining}")
@@ -461,7 +480,7 @@ def apply_lclu_mask(gpkg_path, lclu_path, layer_name="fields",
     layer.CommitTransaction()
 
     if to_delete:
-        ds.ExecuteSQL(f"REPACK {layer_name}")
+        compact_layer(ds, layer_name)
 
     remaining = layer.GetFeatureCount()
     ds = None
