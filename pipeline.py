@@ -22,6 +22,7 @@ import json
 import logging
 import math
 import os
+import resource
 import sqlite3
 import shutil
 import subprocess
@@ -324,12 +325,337 @@ def dump_json(path: Path, payload: dict[str, Any]) -> None:
 
 def write_summary(run_dir: Path, summary: dict[str, Any]) -> None:
     dump_json(run_dir / "manifests" / "run_summary.json", summary)
+    try:
+        write_timing_logs(run_dir, summary)
+    except Exception as exc:
+        LOGGER.warning("Could not write timing logs: %s", exc)
+
+
+def timing_log_paths(run_dir: Path) -> dict[str, Path]:
+    logs_dir = run_dir / "logs"
+    return {
+        "concise": logs_dir / "timing_concise.log",
+        "detailed_json": logs_dir / "timing_detailed.json",
+        "detailed_csv": logs_dir / "timing_detailed.csv",
+    }
+
+
+def read_proc_io() -> dict[str, int]:
+    proc_io = Path("/proc/self/io")
+    if not proc_io.exists():
+        return {}
+
+    values: dict[str, int] = {}
+    try:
+        with proc_io.open("r", encoding="utf-8") as handle:
+            for line in handle:
+                key, _, value = line.partition(":")
+                if key and value:
+                    values[key.strip()] = int(value.strip())
+    except OSError:
+        return {}
+    return values
+
+
+def rusage_snapshot(who: int) -> dict[str, float | int]:
+    usage = resource.getrusage(who)
+    return {
+        "user_cpu_seconds": usage.ru_utime,
+        "system_cpu_seconds": usage.ru_stime,
+        "inblock": usage.ru_inblock,
+        "oublock": usage.ru_oublock,
+    }
+
+
+def timing_snapshot() -> dict[str, Any]:
+    return {
+        "monotonic_seconds": time.monotonic(),
+        "process_cpu_seconds": time.process_time(),
+        "self_rusage": rusage_snapshot(resource.RUSAGE_SELF),
+        "child_rusage": rusage_snapshot(resource.RUSAGE_CHILDREN),
+        "proc_io": read_proc_io(),
+    }
+
+
+def numeric_delta(end: dict[str, Any], start: dict[str, Any], key: str) -> float | int | None:
+    if key not in end or key not in start:
+        return None
+    return end[key] - start[key]
+
+
+def nested_numeric_delta(end: dict[str, Any], start: dict[str, Any], parent: str, key: str) -> float | int | None:
+    end_values = end.get(parent) or {}
+    start_values = start.get(parent) or {}
+    if key not in end_values or key not in start_values:
+        return None
+    return end_values[key] - start_values[key]
+
+
+def timing_metrics(start: dict[str, Any], end: dict[str, Any]) -> dict[str, Any]:
+    self_user = nested_numeric_delta(end, start, "self_rusage", "user_cpu_seconds") or 0.0
+    self_system = nested_numeric_delta(end, start, "self_rusage", "system_cpu_seconds") or 0.0
+    child_user = nested_numeric_delta(end, start, "child_rusage", "user_cpu_seconds") or 0.0
+    child_system = nested_numeric_delta(end, start, "child_rusage", "system_cpu_seconds") or 0.0
+
+    proc_io_keys = set(start.get("proc_io") or {}) | set(end.get("proc_io") or {})
+    proc_io_delta = {
+        key: value
+        for key, value in (
+            (key, nested_numeric_delta(end, start, "proc_io", key))
+            for key in sorted(proc_io_keys)
+        )
+        if value is not None
+    }
+
+    metrics = {
+        "process_cpu_seconds": round((numeric_delta(end, start, "process_cpu_seconds") or 0.0), 3),
+        "self_cpu_seconds": round(self_user + self_system, 3),
+        "child_cpu_seconds": round(child_user + child_system, 3),
+        "total_cpu_seconds": round(self_user + self_system + child_user + child_system, 3),
+        "self_block_reads": int(nested_numeric_delta(end, start, "self_rusage", "inblock") or 0),
+        "self_block_writes": int(nested_numeric_delta(end, start, "self_rusage", "oublock") or 0),
+        "child_block_reads": int(nested_numeric_delta(end, start, "child_rusage", "inblock") or 0),
+        "child_block_writes": int(nested_numeric_delta(end, start, "child_rusage", "oublock") or 0),
+    }
+    if proc_io_delta:
+        metrics["proc_io_delta"] = proc_io_delta
+    return metrics
+
+
+def format_duration(seconds: float | int | None) -> str:
+    if seconds is None:
+        return "-"
+    seconds = float(seconds)
+    if seconds < 60:
+        return f"{seconds:.1f}s"
+    minutes, sec = divmod(int(round(seconds)), 60)
+    hours, minutes = divmod(minutes, 60)
+    if hours:
+        return f"{hours:d}h {minutes:02d}m {sec:02d}s"
+    return f"{minutes:d}m {sec:02d}s"
+
+
+def classify_step_bottleneck(step: dict[str, Any], args: dict[str, Any]) -> dict[str, Any]:
+    name = step.get("name", "")
+    duration = step.get("duration_seconds")
+    reuse_enabled = bool(args.get("reuse_upstream_from") not in (None, "", "None"))
+    skip_sr = str(args.get("skip_super_resolution", "False")).lower() == "true"
+    backend = args.get("delineation_backend", "delineate-anything")
+
+    tags: list[str]
+    dominant: str
+    reason: str
+
+    if name == "preflight":
+        tags, dominant = ["setup", "filesystem_io"], "setup"
+        reason = "Repository/env checks and path validation."
+    elif name == "aoi_and_tile_discovery":
+        tags, dominant = ["vector_io", "cpu"], "vector_io"
+        reason = "Reads AOI/tile grid and intersects vector geometries."
+    elif name.startswith("mosaic_"):
+        tags, dominant = ["network", "raster_io", "subprocess"], "network"
+        reason = "Sentinel/XYZ imagery discovery and download commonly dominate; raster writes are the secondary cost."
+    elif name.startswith("clip_"):
+        tags, dominant = ["raster_io", "cpu"], "raster_io"
+        reason = "Raster read/mask/write step."
+    elif name.startswith("lclu_"):
+        tags, dominant = ["network", "raster_io", "earth_engine"], "network"
+        reason = "Earth Engine request/download is normally the bottleneck; GeoTIFF writes follow."
+    elif name.startswith("super_resolution_"):
+        if skip_sr:
+            tags, dominant = ["filesystem_io"], "filesystem_io"
+            reason = "Super-resolution is skipped, so this is staging/copy work."
+        else:
+            tags, dominant = ["gpu", "raster_io"], "gpu"
+            reason = "OpenSR inference is GPU-heavy with raster read/write overhead."
+    elif name.startswith("stage_delineation_"):
+        tags, dominant = ["filesystem_io"], "filesystem_io"
+        reason = "Copies or symlinks staged rasters/masks into the backend data folder."
+    elif name == "write_delineate_configs":
+        tags, dominant = ["filesystem_io"], "filesystem_io"
+        reason = "Writes backend YAML configs and batch manifests."
+    elif name == "delineation":
+        tags, dominant = ["gpu", "raster_io", "vector_io", "subprocess"], "gpu"
+        reason = f"Runs {backend} inference/polygonization as a subprocess; GPU is usually dominant, with raster/vector IO around it."
+    elif name == "exports":
+        tags, dominant = ["vector_io", "raster_io", "rendering"], "vector_io"
+        reason = "Reads GeoPackages and writes GeoJSON/KML/PNG quicklooks."
+    else:
+        tags, dominant = ["unknown"], "unknown"
+        reason = "No rule is registered for this step name."
+
+    if reuse_enabled and duration is not None and float(duration) < 2 and (
+        name.startswith("mosaic_")
+        or name.startswith("clip_")
+        or name.startswith("lclu_")
+        or name.startswith("super_resolution_")
+    ):
+        dominant = "reuse_filesystem_io"
+        tags = sorted(set(tags + ["reuse", "filesystem_io"]))
+        reason += " Fast duration with upstream reuse enabled suggests this step reused an existing artifact."
+
+    metrics = step.get("resource_metrics") or {}
+    total_cpu = metrics.get("total_cpu_seconds")
+    if duration and total_cpu is not None:
+        cpu_ratio = float(total_cpu) / max(float(duration), 0.001)
+    else:
+        cpu_ratio = None
+
+    return {
+        "dominant_bottleneck": dominant,
+        "expected_bottlenecks": tags,
+        "bottleneck_reason": reason,
+        "cpu_wall_ratio": round(cpu_ratio, 3) if cpu_ratio is not None else None,
+    }
+
+
+def timing_records(summary: dict[str, Any]) -> list[dict[str, Any]]:
+    steps = summary.get("steps", [])
+    completed_total = sum(float(step.get("duration_seconds", 0) or 0) for step in steps if step.get("status") in {"completed", "failed"})
+    args = summary.get("args", {})
+    records = []
+
+    for index, step in enumerate(steps, start=1):
+        duration = step.get("duration_seconds")
+        classification = classify_step_bottleneck(step, args)
+        metrics = step.get("resource_metrics", {})
+        proc_io_delta = metrics.get("proc_io_delta", {}) if isinstance(metrics, dict) else {}
+        record = {
+            "index": index,
+            "name": step.get("name"),
+            "status": step.get("status"),
+            "duration_seconds": duration,
+            "duration_human": format_duration(duration),
+            "percent_of_completed_time": round((float(duration) / completed_total) * 100, 2) if duration and completed_total else None,
+            "started_at": step.get("started_at"),
+            "finished_at": step.get("finished_at"),
+            **classification,
+            "resource_metrics": metrics,
+            "total_cpu_seconds": metrics.get("total_cpu_seconds") if isinstance(metrics, dict) else None,
+            "self_cpu_seconds": metrics.get("self_cpu_seconds") if isinstance(metrics, dict) else None,
+            "child_cpu_seconds": metrics.get("child_cpu_seconds") if isinstance(metrics, dict) else None,
+            "child_block_reads": metrics.get("child_block_reads") if isinstance(metrics, dict) else None,
+            "child_block_writes": metrics.get("child_block_writes") if isinstance(metrics, dict) else None,
+            "proc_read_bytes": proc_io_delta.get("read_bytes"),
+            "proc_write_bytes": proc_io_delta.get("write_bytes"),
+        }
+        if "error" in step:
+            record["error"] = step["error"]
+        records.append(record)
+    return records
+
+
+def timing_totals(records: list[dict[str, Any]]) -> dict[str, Any]:
+    completed = [record for record in records if record.get("duration_seconds") is not None and record.get("status") in {"completed", "failed"}]
+    total_seconds = sum(float(record["duration_seconds"]) for record in completed)
+    bottleneck_seconds: dict[str, float] = {}
+    status_counts: dict[str, int] = {}
+
+    for record in records:
+        status = str(record.get("status"))
+        status_counts[status] = status_counts.get(status, 0) + 1
+        duration = record.get("duration_seconds")
+        if duration is None:
+            continue
+        bottleneck = str(record.get("dominant_bottleneck", "unknown"))
+        bottleneck_seconds[bottleneck] = bottleneck_seconds.get(bottleneck, 0.0) + float(duration)
+
+    return {
+        "completed_wall_seconds": round(total_seconds, 3),
+        "completed_wall_human": format_duration(total_seconds),
+        "status_counts": status_counts,
+        "dominant_bottleneck_seconds": {key: round(value, 3) for key, value in sorted(bottleneck_seconds.items(), key=lambda item: item[1], reverse=True)},
+        "dominant_bottleneck_human": {key: format_duration(value) for key, value in sorted(bottleneck_seconds.items(), key=lambda item: item[1], reverse=True)},
+    }
+
+
+def write_timing_logs(run_dir: Path, summary: dict[str, Any]) -> None:
+    paths = timing_log_paths(run_dir)
+    for path in paths.values():
+        path.parent.mkdir(parents=True, exist_ok=True)
+
+    records = timing_records(summary)
+    totals = timing_totals(records)
+    generated_at = dt.datetime.now(dt.timezone.utc).isoformat()
+
+    detailed = {
+        "run_name": summary.get("run_name"),
+        "run_dir": summary.get("run_dir"),
+        "generated_at": generated_at,
+        "note": "Bottleneck labels are heuristic by step type. Resource counters are best-effort and may not include all child-process or network activity.",
+        "totals": totals,
+        "steps": records,
+    }
+    dump_json(paths["detailed_json"], detailed)
+
+    csv_fields = [
+        "index",
+        "status",
+        "duration_seconds",
+        "duration_human",
+        "percent_of_completed_time",
+        "dominant_bottleneck",
+        "expected_bottlenecks",
+        "cpu_wall_ratio",
+        "total_cpu_seconds",
+        "self_cpu_seconds",
+        "child_cpu_seconds",
+        "child_block_reads",
+        "child_block_writes",
+        "proc_read_bytes",
+        "proc_write_bytes",
+        "name",
+        "started_at",
+        "finished_at",
+        "bottleneck_reason",
+        "error",
+    ]
+    with paths["detailed_csv"].open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=csv_fields)
+        writer.writeheader()
+        for record in records:
+            row = {field: record.get(field) for field in csv_fields}
+            row["expected_bottlenecks"] = ",".join(record.get("expected_bottlenecks") or [])
+            writer.writerow(row)
+
+    lines = [
+        f"Timing Summary: {summary.get('run_name')}",
+        f"Generated: {generated_at}",
+        "Note: bottleneck labels are heuristic by step type; detailed metrics are in timing_detailed.json/csv.",
+        "",
+        f"Completed wall time: {totals['completed_wall_human']} ({totals['completed_wall_seconds']}s)",
+        "By dominant bottleneck:",
+    ]
+    if totals["dominant_bottleneck_human"]:
+        for bottleneck, human in totals["dominant_bottleneck_human"].items():
+            seconds = totals["dominant_bottleneck_seconds"][bottleneck]
+            lines.append(f"  {bottleneck:22s} {human:>12s}  {seconds:>10.3f}s")
+    else:
+        lines.append("  -")
+
+    lines.extend(
+        [
+            "",
+            f"{'#':>3s} {'status':10s} {'duration':>12s} {'dominant':22s} step",
+            "-" * 90,
+        ]
+    )
+    for record in records:
+        lines.append(
+            f"{record['index']:>3d} "
+            f"{str(record.get('status', '-')):10.10s} "
+            f"{record.get('duration_human', '-'):>12s} "
+            f"{str(record.get('dominant_bottleneck', '-')):22.22s} "
+            f"{record.get('name')}"
+        )
+
+    paths["concise"].write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
 @contextlib.contextmanager
 def timed_step(summary: dict[str, Any], run_dir: Path, name: str) -> Iterable[None]:
     LOGGER.info("START %s", name)
-    start = time.monotonic()
+    start = timing_snapshot()
     step: dict[str, Any] = {
         "name": name,
         "status": "running",
@@ -340,11 +666,14 @@ def timed_step(summary: dict[str, Any], run_dir: Path, name: str) -> Iterable[No
     try:
         yield
     except Exception as exc:
-        elapsed = time.monotonic() - start
+        end = timing_snapshot()
+        elapsed = end["monotonic_seconds"] - start["monotonic_seconds"]
         step.update(
             {
                 "status": "failed",
                 "duration_seconds": round(elapsed, 3),
+                "finished_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+                "resource_metrics": timing_metrics(start, end),
                 "error": str(exc),
                 "traceback": traceback.format_exc(),
             }
@@ -353,12 +682,14 @@ def timed_step(summary: dict[str, Any], run_dir: Path, name: str) -> Iterable[No
         LOGGER.exception("FAILED %s after %.1fs", name, elapsed)
         raise
     else:
-        elapsed = time.monotonic() - start
+        end = timing_snapshot()
+        elapsed = end["monotonic_seconds"] - start["monotonic_seconds"]
         step.update(
             {
                 "status": "completed",
                 "duration_seconds": round(elapsed, 3),
                 "finished_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+                "resource_metrics": timing_metrics(start, end),
             }
         )
         write_summary(run_dir, summary)
@@ -2119,11 +2450,13 @@ def main() -> None:
     run_dir = Path(args.output_root).expanduser().resolve() / run_name
     run_dir.mkdir(parents=True, exist_ok=True)
     log_path = setup_logging(run_dir)
+    timing_paths = timing_log_paths(run_dir)
 
     summary: dict[str, Any] = {
         "run_name": run_name,
         "run_dir": str(run_dir),
         "log_path": str(log_path),
+        "timing_logs": {key: str(path) for key, path in timing_paths.items()},
         "started_at": dt.datetime.now(dt.timezone.utc).isoformat(),
         "args": {key: str(value) for key, value in vars(args).items()},
     }
