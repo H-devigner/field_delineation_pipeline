@@ -117,13 +117,18 @@ def merge_gpkgs(input_paths, output_path, layer_name="fields"):
         out_layer.StartTransaction()
         out_defn = out_layer.GetLayerDefn()
         count = 0
+        skipped_non_surface = 0
         src_layer.ResetReading()
         for feat in src_layer:
             geom = feat.GetGeometryRef()
             if geom is None or geom.IsEmpty():
                 continue
+            geom_clone = _surface_geometry(geom)
+            if geom_clone is None:
+                skipped_non_surface += 1
+                continue
             out_feat = ogr.Feature(out_defn)
-            out_feat.SetGeometry(geom.Clone())
+            out_feat.SetGeometry(geom_clone)
             for i in range(out_defn.GetFieldCount()):
                 fname = out_defn.GetFieldDefn(i).GetName()
                 try:
@@ -134,6 +139,8 @@ def merge_gpkgs(input_paths, output_path, layer_name="fields"):
             count += 1
         out_layer.CommitTransaction()
         total += count
+        if skipped_non_surface:
+            logger.warning(f"  {path}: skipped {skipped_non_surface} non-surface geometries")
         logger.info(f"  {path}: {count} features")
         src_ds = None
 
@@ -161,21 +168,31 @@ def dissolve_overlaps(gpkg_path, layer_name="fields", iou_threshold=0.3):
 
     # Load all geometries into memory
     features_data = []
+    skipped_non_surface = 0
     layer.ResetReading()
     for feat in layer:
         geom = feat.GetGeometryRef()
         if geom is None or geom.IsEmpty():
             continue
         fid = feat.GetFID()
-        geom_clone = geom.Clone()
+        geom_clone = _surface_geometry(geom)
+        if geom_clone is None:
+            skipped_non_surface += 1
+            continue
+        area = geom_clone.GetArea()
+        if area <= 0:
+            skipped_non_surface += 1
+            continue
         bg = 0
         try:
             bg = feat.GetField("bg")
         except Exception:
             pass
-        features_data.append({"fid": fid, "geom": geom_clone, "bg": bg, "merged": False})
+        features_data.append({"fid": fid, "geom": geom_clone, "area": area, "bg": bg, "merged": False})
 
     logger.info(f"  Loaded {len(features_data)} features")
+    if skipped_non_surface:
+        logger.warning(f"  Skipped {skipped_non_surface} empty or non-surface geometries")
 
     # Build merge groups using pairwise IoU
     merge_groups = []
@@ -214,9 +231,11 @@ def dissolve_overlaps(gpkg_path, layer_name="fields", iou_threshold=0.3):
                     inter = geom_a.Intersection(geom_b)
                     if inter is None or inter.IsEmpty():
                         continue
-                    inter_area = inter.GetArea()
-                    area_a = geom_a.GetArea()
-                    area_b = geom_b.GetArea()
+                    inter_area = _surface_area(inter)
+                    if inter_area <= 0:
+                        continue
+                    area_a = features_data[ci]["area"]
+                    area_b = features_data[j]["area"]
                     union_area = area_a + area_b - inter_area
                     if union_area <= 0:
                         continue
@@ -269,6 +288,9 @@ def dissolve_overlaps(gpkg_path, layer_name="fields", iou_threshold=0.3):
                         continue
 
         if merged is None or merged.IsEmpty():
+            continue
+        merged = _surface_geometry(merged)
+        if merged is None:
             continue
 
         # Decompose MultiPolygon
@@ -325,8 +347,9 @@ def filter_by_area(gpkg_path, layer_name="fields",
 
     layer.ResetReading()
     for feat in tqdm(layer, desc="  Filtering", total=n_total, unit="poly"):
-        geom = feat.GetGeometryRef()
-        if geom is None or geom.IsEmpty():
+        source_geom = feat.GetGeometryRef()
+        geom = _surface_geometry(source_geom)
+        if geom is None:
             to_delete.append(feat.GetFID())
             continue
 
@@ -345,6 +368,8 @@ def filter_by_area(gpkg_path, layer_name="fields",
         new_geom, new_area = _remove_holes(geom, min_hole_area_m2, transform)
         if new_geom is not None:
             to_update.append((feat.GetFID(), new_geom, new_area))
+        elif not _is_surface_type(source_geom):
+            to_update.append((feat.GetFID(), geom, area))
 
     layer.StartTransaction()
     for fid in to_delete:
@@ -519,6 +544,7 @@ def add_statistics(gpkg_path, layer_name="fields"):
     count = 0
     for feat in layer:
         geom = feat.GetGeometryRef()
+        geom = _surface_geometry(geom)
         if geom is None:
             continue
         ea = geom.Clone()
@@ -549,11 +575,13 @@ def add_statistics(gpkg_path, layer_name="fields"):
 
 def _remove_holes(geom, min_hole_area_m2, transform):
     """Remove interior rings smaller than threshold. Returns (geom, area)."""
-    geom_type = geom.GetGeometryType()
-    if geom_type != ogr.wkbPolygon:
+    geom_type = ogr.GT_Flatten(geom.GetGeometryType())
+    if geom_type == ogr.wkbMultiPolygon:
         ea = geom.Clone()
         ea.Transform(transform)
         return None, ea.GetArea()
+    if geom_type != ogr.wkbPolygon:
+        return None, 0
 
     n_rings = geom.GetGeometryCount()
     if n_rings <= 1:
@@ -582,17 +610,51 @@ def _remove_holes(geom, min_hole_area_m2, transform):
 
 def _decompose(geom):
     """Decompose a geometry into individual Polygons."""
-    gt = geom.GetGeometryType()
+    gt = ogr.GT_Flatten(geom.GetGeometryType())
     if gt == ogr.wkbPolygon:
-        return [geom]
+        return [geom.Clone()]
     elif gt in (ogr.wkbMultiPolygon, ogr.wkbGeometryCollection):
         result = []
         for i in range(geom.GetGeometryCount()):
             sub = geom.GetGeometryRef(i)
-            if sub.GetGeometryType() == ogr.wkbPolygon:
-                result.append(sub.Clone())
+            result.extend(_decompose(sub))
         return result
     return []
+
+
+def _surface_area(geom):
+    """Return area of the polygonal part of a geometry without warning on lines/points."""
+    surface = _surface_geometry(geom)
+    if surface is None:
+        return 0.0
+    return surface.GetArea()
+
+
+def _surface_geometry(geom):
+    """Extract polygonal parts from a geometry, or None when no surface remains."""
+    if geom is None or geom.IsEmpty():
+        return None
+
+    parts = _decompose(geom)
+    if not parts:
+        return None
+    if len(parts) == 1:
+        return parts[0]
+
+    multi = ogr.Geometry(ogr.wkbMultiPolygon)
+    for part in parts:
+        if part is not None and not part.IsEmpty():
+            multi.AddGeometry(part)
+    if multi.IsEmpty():
+        return None
+    return multi
+
+
+def _is_surface_type(geom):
+    if geom is None:
+        return False
+    gt = ogr.GT_Flatten(geom.GetGeometryType())
+    return gt in (ogr.wkbPolygon, ogr.wkbMultiPolygon)
 
 
 # ═══════════════════════════════════════════════════════════════
