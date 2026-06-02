@@ -371,6 +371,23 @@ The build step requires `tippecanoe` and GDAL command-line tools. In conda, inst
 
 The generated viewer includes a live `Min Area` filter when the `area` attribute is present in the vector tiles. The default build keeps `area`, so you can test candidate thresholds in the browser without generating multiple filtered GPKG/GeoJSON files. The current threshold is also reflected in the URL as `?min_area=...` so you can bookmark or share it.
 
+For interactive exploration of large GeoTIFF imagery, build a raster viewer package from one `.tif` or from a folder of `.tif/.tiff` files:
+
+```bash
+python raster_tile_viewer.py build \
+  --input "$RUNS/$RUN/04_super_resolution" \
+  --output-dir "$RUNS/$RUN/10_raster_viewer" \
+  --name "$RUN imagery" \
+  --bands 1,2,3
+
+python raster_tile_viewer.py serve \
+  --viewer-dir "$RUNS/$RUN/10_raster_viewer" \
+  --host 0.0.0.0 \
+  --port 8090
+```
+
+The raster viewer serves dynamic XYZ PNG tiles directly from the source GeoTIFFs, so the browser only requests the image windows needed for the current zoom. Folder inputs are shown both as a combined mosaic layer and as individual selectable rasters. It is fastest when the GeoTIFFs are Cloud Optimized GeoTIFFs or have internal overviews; the build command warns when a source has no overviews.
+
 ## Main Functions
 
 `load_aoi`: reads GeoJSON, Shapefile, GPKG, or WKT AOIs and normalizes CRS.
@@ -396,6 +413,8 @@ The generated viewer includes a live `Min Area` filter when the `area` attribute
 `postprocess_instance_rasters`: polygonizes positive instance IDs, reconciles cross-raster seam IDs, dissolves merged fields, and writes global GPKG/GeoJSON/PNG outputs.
 
 `vector_tile_viewer`: packages large GPKG/GeoJSON outputs into MBTiles vector tiles and serves a MapLibre basemap viewer.
+
+`raster_tile_viewer`: indexes one GeoTIFF or a folder of GeoTIFFs and serves a browser map that streams raster tiles from the source imagery.
 
 `export_results`: converts final GeoPackages into WGS84 GeoJSON/KML, boundary quicklook PNGs, optional SR-overlay PNGs, summary CSV/JSON, and an `index.html` gallery.
 
