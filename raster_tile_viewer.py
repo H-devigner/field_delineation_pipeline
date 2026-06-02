@@ -579,7 +579,7 @@ def read_tile_rgba(state: TileServerState, entry: RasterEntry, z: int, x: int, y
     if not np.any(valid):
         return None
 
-    filled = np.ma.filled(data, np.nan).astype("float32")
+    filled = data.astype("float32").filled(np.nan)
     channels = []
     for idx, stats in enumerate(entry.stats):
         lo = float(stats["min"])
