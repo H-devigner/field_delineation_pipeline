@@ -1805,6 +1805,9 @@ def write_delineate_configs(
     with base_config_path.open("r", encoding="utf-8") as handle:
         config = yaml.safe_load(handle)
 
+    config.setdefault("mask_info", {})
+    config.setdefault("data_loader", {})
+    config.setdefault("passes", [])
     config["model"] = parse_csv(args.delineate_models)
     config["mask_info"]["range"] = args.mask_range
     config["mask_info"]["filter_classes"] = parse_int_csv(args.mask_filter_classes)
@@ -1827,14 +1830,17 @@ def write_delineate_configs(
 
     output_root = args.delineate_output_root or (run_dir / "06_delineated")
     temp_root = run_dir / "05_delineate_temp"
+    data_root, staged_mask_root = delineate_staging_roots(run_dir)
+    data_root.mkdir(parents=True, exist_ok=True)
     if args.skip_lclu:
         mask_root = config_dir / "empty_masks"
         mask_root.mkdir(parents=True, exist_ok=True)
     else:
-        mask_root = DELINEATE_ROOT / "data" / "masks"
+        mask_root = staged_mask_root
+        mask_root.mkdir(parents=True, exist_ok=True)
     batch_config = {
         "base_config": str(pipeline_config_path.resolve()),
-        "data_root": str((DELINEATE_ROOT / "data" / "images").resolve()),
+        "data_root": str(data_root.resolve()),
         "output_root": str(output_root.resolve()),
         "temp_root": str(temp_root.resolve()),
         "keep_temp": bool(args.keep_delineate_temp),
@@ -1920,16 +1926,23 @@ def run_exports(
     return rows
 
 
+def delineate_staging_roots(run_dir: Path) -> tuple[Path, Path]:
+    stage_root = run_dir / "05_delineate_inputs"
+    return stage_root / "images", stage_root / "masks"
+
+
 def stage_tile_for_delineation(
     *,
     tile_id: str,
     sr_tif: Path,
     mask_tif: Path | None,
+    run_dir: Path,
     args: argparse.Namespace,
 ) -> dict[str, str | None]:
-    image_dir = DELINEATE_ROOT / "data" / "images" / tile_id
+    data_root, mask_root = delineate_staging_roots(run_dir)
+    image_dir = data_root / tile_id
     staged_sr = image_dir / "sr.tif"
-    staged_mask = DELINEATE_ROOT / "data" / "masks" / f"{tile_id}.tif"
+    staged_mask = mask_root / f"{tile_id}.tif"
     copy_or_symlink(sr_tif, staged_sr, args.stage_mode, args.overwrite)
 
     staged_mask_value = None
@@ -2082,6 +2095,7 @@ def main() -> None:
                 tile_id=tile_id,
                 sr_tif=sr_path,
                 mask_tif=mask_path,
+                run_dir=run_dir,
                 args=args,
             )
             staged_tiles.append(tile_id)

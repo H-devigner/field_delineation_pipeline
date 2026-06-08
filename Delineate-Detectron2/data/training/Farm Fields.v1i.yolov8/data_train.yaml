@@ -1,0 +1,14 @@
+names:
+- land-Sx1C
+nc: 1
+path: /Users/houcine/Desktop/from_oci/Delineate-Anything_just_folders_keeper/roboflow_data_explore/Farm
+  Fields.v1i.yolov8
+roboflow:
+  license: CC BY 4.0
+  project: farm-fields
+  url: https://universe.roboflow.com/odhiambb/farm-fields/dataset/1
+  version: 1
+  workspace: odhiambb
+test: test/images
+train: train/images
+val: valid/images
