@@ -442,6 +442,16 @@ The generated viewer includes a live `Min Area` filter when the `area` attribute
 
 `--save-instance-rasters`: writes `06_instance_rasters/<tile_id>/*.instances.tif` from Delineate-Anything immediately before polygonization.
 
+`--delineate-models`: chooses the Delineate-Anything checkpoint used by both the top-level config and each pass's `model_args`. Existing v1 models remain supported:
+
+```text
+small    -> MykolaL/DelineateAnything / DelineateAnything-S.pt
+large    -> MykolaL/DelineateAnything / DelineateAnything.pt
+large_v2 -> MykolaL/DelineateAnything / DelineateAnythingv2.pt
+```
+
+Use `--delineate-models large_v2` for the official Delineate-Anything v2 model from `Lavreniuk/Delineate-Anything` reference commit `9c4db7adc38a092b57e4b72f09247e1d083dd30f`. The pipeline preserves explicit band selection, so SkySat-style B/G/R/NIR rasters can still be passed as RGB with `--delineate-bands 3,2,1`.
+
 `postprocess_instance_rasters`: polygonizes positive instance IDs, reconciles cross-raster seam IDs, dissolves merged fields, and writes global GPKG/GeoJSON/PNG outputs.
 
 `vector_tile_viewer`: packages large GPKG/GeoJSON outputs into MBTiles vector tiles and serves a MapLibre basemap viewer.

@@ -285,6 +285,19 @@ def parse_int_csv(value: str | None) -> list[int]:
     return [int(item) for item in parse_csv(value)]
 
 
+def sync_delineate_model_args(config: dict[str, Any], model_names: list[str], *, use_half: bool = True) -> None:
+    """Keep Delineate-Anything top-level model list and per-pass model args aligned."""
+    for pass_config in config.get("passes", []):
+        existing_args = pass_config.get("model_args") or [{}]
+        template = dict(existing_args[0])
+        template.setdefault("minimal_confidence", 0.005)
+        template["use_half"] = use_half
+        pass_config["model_args"] = [
+            {**template, "name": model_name}
+            for model_name in model_names
+        ]
+
+
 def parse_window_size(value: str) -> tuple[int, int]:
     parts = parse_int_csv(value)
     if len(parts) != 2 or min(parts) <= 0:
@@ -2159,7 +2172,8 @@ def write_delineate_configs(
     with base_config_path.open("r", encoding="utf-8") as handle:
         config = yaml.safe_load(handle)
 
-    config["model"] = parse_csv(args.delineate_models)
+    delineate_models = parse_csv(args.delineate_models)
+    config["model"] = delineate_models
     config["mask_info"]["range"] = args.mask_range
     config["mask_info"]["filter_classes"] = parse_int_csv(args.mask_filter_classes)
     config["mask_info"]["clip_classes"] = parse_int_csv(args.mask_clip_classes)
@@ -2172,8 +2186,7 @@ def write_delineate_configs(
     }
     for pass_config in config["passes"]:
         pass_config["batch_size"] = args.delineate_batch_size
-        for model_args in pass_config.get("model_args", []):
-            model_args["use_half"] = True
+    sync_delineate_model_args(config, delineate_models, use_half=True)
 
     pipeline_config_path = config_dir / "conf_pipeline.yaml"
     with pipeline_config_path.open("w", encoding="utf-8") as handle:
